@@ -18,6 +18,42 @@ interface SearchResult {
     snippet: string;
 }
 
+// ─── Serper.dev Google Search (works reliably from cloud servers) ───
+async function searchSerper(query: string): Promise<SearchResult[]> {
+    const apiKey = process.env.SERPER_API_KEY;
+    if (!apiKey) return [];
+
+    try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        const res = await fetch("https://google.serper.dev/search", {
+            method: "POST",
+            headers: {
+                "X-API-KEY": apiKey,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ q: query, num: 10 }),
+            signal: controller.signal,
+        });
+        clearTimeout(timeout);
+
+        if (!res.ok) return [];
+
+        const data = await res.json();
+        const organic = data.organic;
+        if (!Array.isArray(organic) || organic.length === 0) return [];
+
+        return organic.slice(0, 10).map((r: { title?: string; link?: string; snippet?: string; favicon?: string }) => ({
+            title: r.title || "Untitled",
+            url: r.link || "",
+            favicon: r.favicon || "",
+            snippet: r.snippet || "",
+        }));
+    } catch {
+        return [];
+    }
+}
+
 // ─── SearXNG-powered search (uses public instances with fallback) ───
 const SEARXNG_INSTANCES = (process.env.SEARXNG_INSTANCES || "").split(",").filter(Boolean);
 
@@ -64,7 +100,86 @@ async function searchSearXNG(query: string): Promise<SearchResult[]> {
     return [];
 }
 
-// ─── DuckDuckGo Lite HTML search (reliable fallback) ───
+// ─── DuckDuckGo HTML search ───
+async function searchDuckDuckGoHTML(query: string): Promise<SearchResult[]> {
+    try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        const res = await fetch("https://html.duckduckgo.com/html/", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            body: `q=${encodeURIComponent(query)}&b=`,
+            signal: controller.signal,
+        });
+        clearTimeout(timeout);
+
+        if (!res.ok) return [];
+
+        const html = await res.text();
+        const results: SearchResult[] = [];
+
+        // Match result links and snippets from DDG HTML page
+        const resultBlockRegex = /<a\s+rel="nofollow"\s+class="result__a"\s+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a\s+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+
+        let match;
+        while ((match = resultBlockRegex.exec(html)) !== null && results.length < 10) {
+            const url = match[1];
+            const title = match[2].replace(/<[^>]*>/g, "").trim();
+            const snippet = match[3].replace(/<[^>]*>/g, "").replace(/&\w+;/g, " ").trim();
+
+            // Skip DDG internal links
+            if (url && !url.includes("duckduckgo.com")) {
+                results.push({
+                    title: title || "Untitled",
+                    url: url,
+                    favicon: "",
+                    snippet: snippet,
+                });
+            }
+        }
+
+        // Fallback: try simpler regex if the above didn't match
+        if (results.length === 0) {
+            const linkRegex = /class="result__a"\s+href="(https?:\/\/[^"]+)"[^>]*>([^<]*(?:<[^>]*>[^<]*)*)<\/a>/g;
+            const snippetRegex = /class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+
+            const links: { url: string; title: string }[] = [];
+            const snippets: string[] = [];
+
+            while ((match = linkRegex.exec(html)) !== null) {
+                links.push({
+                    url: match[1],
+                    title: match[2].replace(/<[^>]*>/g, "").trim(),
+                });
+            }
+            while ((match = snippetRegex.exec(html)) !== null) {
+                snippets.push(match[1].replace(/<[^>]*>/g, "").replace(/&\w+;/g, " ").trim());
+            }
+
+            for (let i = 0; i < links.length && results.length < 10; i++) {
+                if (links[i].url) {
+                    results.push({
+                        title: links[i].title || "Untitled",
+                        url: links[i].url,
+                        favicon: "",
+                        snippet: snippets[i] || "",
+                    });
+                }
+            }
+        }
+
+        return results;
+    } catch {
+        return [];
+    }
+}
+
+// ─── DuckDuckGo Lite HTML search (fallback) ───
 async function searchDuckDuckGoLite(query: string): Promise<SearchResult[]> {
     try {
         const controller = new AbortController();
@@ -73,7 +188,7 @@ async function searchDuckDuckGoLite(query: string): Promise<SearchResult[]> {
             method: "POST",
             headers: {
                 "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             },
             body: `q=${encodeURIComponent(query)}`,
             signal: controller.signal,
@@ -119,11 +234,21 @@ async function searchDuckDuckGoLite(query: string): Promise<SearchResult[]> {
     }
 }
 
-// ─── Combined search: try SearXNG first, fall back to DDG Lite ───
+// ─── Combined search: cascading fallback chain ───
 async function webSearch(query: string): Promise<SearchResult[]> {
-    let results = await searchSearXNG(query);
+    // 1. Serper.dev (Google results — most reliable from cloud)
+    let results = await searchSerper(query);
     if (results.length > 0) return results;
 
+    // 2. SearXNG public instances
+    results = await searchSearXNG(query);
+    if (results.length > 0) return results;
+
+    // 3. DuckDuckGo HTML
+    results = await searchDuckDuckGoHTML(query);
+    if (results.length > 0) return results;
+
+    // 4. DuckDuckGo Lite (last resort)
     results = await searchDuckDuckGoLite(query);
     return results;
 }
