@@ -19,6 +19,18 @@ Built with **Next.js 14**, **Tailwind CSS**, and the **Vercel AI SDK**, Aetheron
 
 ---
 
+## 🌟 Why Aetheron Stands Out
+
+There are many AI search engines, but Aetheron differentiates itself through a strict focus on speed, privacy, and efficiency:
+
+1. **🔒 Privacy-First Web Searching:** Aetheron doesn't track you. By combining **SearXNG** (a privacy-respecting metasearch engine) and **DuckDuckGo Lite** for search aggregation, your queries are anonymized and shielded from Big Tech data profiling.
+2. **🪶 Ultra-Lightweight "Vector-less" Architecture:** Instead of relying on expensive, heavy Vector Databases like Pinecone, Aetheron performs **local, on-the-fly keyword chunk scoring**. It reads web pages live and scores text against your query in milliseconds, using a fraction of the memory of its competitors.
+3. **⚡ Lightning Fast Inference:** Hooked directly into **Groq's LPU inference engine**, Aetheron utilizes incredibly fast open-source models (like `llama-3.1-8b-instant`). This allows tokens to stream into the UI at blistering speeds—no agonizing "thinking" spinners.
+4. **🧹 Pure Content Extraction:** Instead of feeding raw HTML to the AI (which causes hallucinations), Aetheron uses the **Jina Reader API**. This strips away cookie banners, complex navigation menus, and ads, leaving only pure, clean Markdown text for the AI to synthesize securely.
+5. **💻 100% Local-First Memory:** Your research data never leaves your device unless you query it. Aetheron utilizes **browser-native Local Storage** to maintain your chat history, guaranteeing your past conversations remain totally private and under your control.
+
+---
+
 ## 🧠 System Architecture: How It Works
 
 When a user submits a query, Aetheron executes a highly orchestrated pipeline:
