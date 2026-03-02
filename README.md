@@ -1,36 +1,111 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Aetheron 🌌
 
-## Getting Started
+Aetheron is an advanced, fully agentic AI search engine built to deliver real-time, highly accurate answers sourced directly from the web. Inspired by platforms like Perplexity, Aetheron acts as an intelligent research assistant, summarizing complex topics by dynamically searching, reading, and synthesizing information across multiple sources.
 
-First, run the development server:
+Built with **Next.js 14**, **Tailwind CSS**, and the **Vercel AI SDK**, Aetheron utilizes ultra-fast inference from **Groq** to power its language models.
+
+---
+
+## 🚀 Features
+
+- **Agentic Web Search:** Aetheron doesn't just guess; it actively searches the internet.
+  - Generates highly optimized search queries based on user intent and conversational history.
+  - Queries multiple public **SearXNG** instances simultaneously, with an automatic, resilient fallback to DuckDuckGo HTML Lite.
+- **Deep Content Extraction:** Uses the **Jina Reader API** to fetch, parse, and clean the actual web content of the discovered URLs, discarding headers, footers, and ads.
+- **Retrieval-Augmented Generation (RAG):** Slices, chunks, and keyword-scores the extracted context locally before feeding it to the AI to prevent hallucinations.
+- **Real-Time Streaming:** The UI utilizes Server-Sent Events (SSE) via the Vercel AI SDK to stream the Llama models' thinking and generating processes directly to the user in real-time.
+- **Conversational Memory:** Preserves history of local chat threads so you can seamlessly revisit previously explored topics.
+- **Beautiful UI:** A premium, fully responsive interface powered by Framer Motion animations, Lucide React icons, and a dark/light mode toggle.
+
+---
+
+## 🧠 System Architecture: How It Works
+
+When a user submits a query, Aetheron executes a highly orchestrated pipeline:
+
+1. **Query Rewriting:** A fast model (`llama-3.1-8b-instant`) interprets the user's latest query along with the conversation history. It resolves pronouns/references and generates two new highly optimized search queries.
+2. **Execution:** It runs concurrent web searches for the generated queries to aggregate URLs. 
+3. **Deduplication:** Aggregated URLs are deduplicated to find the absolute best 6 unique sources.
+4. **Scraping (Jina Reader):** The top 3 URLs are fed into the Jina Reader API to get clean text representations of the webpages. 
+5. **Local Vector-less Scoring:** The resulting webpage text is split into chunks and scored sequentially against the user's base keywords to weed out irrelevant fluff.
+6. **Synthesis:** A highly structured RAG mapping prompt is generated and fed to Aetheron's core model (`meta-llama/llama-4-scout-17b-16e-instruct` by default). The model generates a comprehensive markdown-formatted answer with inline citations `[1]`, streaming back to the client instantly.
+
+---
+
+## 🛠 Setup & Installation
+
+Follow these steps to deploy Aetheron locally for testing or development.
+
+### 1. Requirements
+
+- [Node.js](https://nodejs.org/) 18+  
+- A free API key from [Groq](https://console.groq.com/keys)
+
+### 2. Clone the Repository
+
+```bash
+git clone https://github.com/Smilin01/Aetheron.git
+cd Aetheron
+```
+
+### 3. Install Dependencies
+
+You can use npm, yarn, pnpm, or bun. 
+
+```bash
+npm install
+```
+
+### 4. Configure Environment Variables
+
+Create a new file named `.env.local` in the root of your project:
+
+```bash
+touch .env.local
+```
+
+Populate it with the following keys:
+
+```env
+# Required: Your Groq API Key to power the LLMs
+GROQ_API_KEY=gsk_your_api_key_here
+
+# Optional: Override the default synthesis model
+# ANSWER_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+
+# Optional: A comma-separated list of your preferred SearXNG instances. 
+# If not provided, it falls back to a curated list of reliable public nodes.
+# SEARXNG_INSTANCES=https://search.sapti.me,https://searx.be
+```
+
+### 5. Run the Application
+
+Start the development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) in your browser. You can now start searching!
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## 💻 Tech Stack
 
-## Learn More
+- **Framework:** [Next.js 14](https://nextjs.org/) (App Router)
+- **Language:** TypeScript
+- **Styling:** Tailwind CSS
+- **Animation:** Framer Motion
+- **AI Integration:** [Vercel AI SDK](https://sdk.vercel.ai/docs)
+- **Primary LLM Provider:** Groq (Llama 3 / 4)
+- **Tooling:** SearXNG (Search), Jina AI (URL content extraction)
 
-To learn more about Next.js, take a look at the following resources:
+---
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## 📜 License
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## Deploy on Vercel
+## 🤝 Contributing
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+We welcome contributions! Please see our [CONTRIBUTING.md](CONTRIBUTING.md) guide for details on how to get started, format your pull requests, and help build Aetheron.
