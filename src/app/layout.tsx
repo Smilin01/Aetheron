@@ -10,6 +10,9 @@ export const metadata: Metadata = {
   description:
     "A lightweight, no-account-required AI answer engine powered by Groq, DuckDuckGo, and Jina Reader.",
   keywords: ["AI search", "answer engine", "Aetheron alternative", "RAG", "Groq"],
+  icons: {
+    icon: "/favicon.png",
+  },
 };
 
 export default function RootLayout({

@@ -50,7 +50,7 @@ async function searchSearXNG(query: string): Promise<SearchResult[]> {
             const data = await res.json();
             if (!data.results || data.results.length === 0) continue;
 
-            return data.results.slice(0, 10).map((r: any) => ({
+            return data.results.slice(0, 10).map((r: { title?: string; url?: string; content?: string }) => ({
                 title: r.title || "Untitled",
                 url: r.url || "",
                 favicon: "",
@@ -148,7 +148,7 @@ export async function POST(req: Request) {
         const encoder = new TextEncoder();
         const stream = new ReadableStream({
             async start(controller) {
-                const sendEvent = (type: string, data: any) => {
+                const sendEvent = (type: string, data: Record<string, unknown>) => {
                     controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type, ...data })}\n\n`));
                 };
 
@@ -161,7 +161,7 @@ export async function POST(req: Request) {
 
                     try {
                         // Format history for context (last 4 messages to save tokens)
-                        const historyContext = messages.slice(-5, -1).map((m: any) =>
+                        const historyContext = messages.slice(-5, -1).map((m: { role: string; content: string }) =>
                             `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.substring(0, 300)}`
                         ).join('\n');
 
@@ -247,7 +247,7 @@ export async function POST(req: Request) {
                             // Successfully read full page
                             sendEvent("read_complete", { url, hostname, success: true });
                             return { url, text };
-                        } catch (err) {
+                        } catch {
                             // Fallback gracefully to search snippet
                             sendEvent("read_complete", { url, hostname, success: true }); // Mark success in UI since we have a snippet
                             return { url, text: fallbackSnippet };
@@ -365,9 +365,9 @@ ${contextText}`;
 
                     sendEvent("done", {});
                     controller.close();
-                } catch (error: any) {
+                } catch (error: unknown) {
                     console.error("Stream execution error:", error);
-                    sendEvent("error", { message: error.message || "An error occurred" });
+                    sendEvent("error", { message: (error instanceof Error ? error.message : "An error occurred") });
                     controller.close();
                 }
             }

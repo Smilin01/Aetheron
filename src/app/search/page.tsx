@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element */
+
 import {
     useEffect,
     useState,
@@ -26,9 +28,6 @@ import {
     XCircle,
     PanelLeftClose,
     PanelLeftOpen,
-    Plus,
-    Trash2,
-    Clock,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -198,12 +197,13 @@ function SearchContent() {
         if (currentThreadId && messages.length > 0) {
             const firstUserMsg = messages.find((m) => m.role === "user");
             const title = firstUserMsg?.content.slice(0, 60) || "New Thread";
+            const currentThreads = loadThreads();
             const thread: ChatThread = {
                 id: currentThreadId,
                 title,
                 messages,
                 sources,
-                createdAt: threads.find((t) => t.id === currentThreadId)?.createdAt || Date.now(),
+                createdAt: currentThreads.find((t) => t.id === currentThreadId)?.createdAt || Date.now(),
                 updatedAt: Date.now(),
             };
             saveThread(thread);
@@ -227,7 +227,7 @@ function SearchContent() {
     }, [threadParam]);
 
     const streamSearch = useCallback(
-        async (allMessages: Message[], model: string, threadId: string) => {
+        async (allMessages: Message[], model: string) => {
             setIsSearching(true);
             setIsStreaming(true);
             setProcessSteps([]);
@@ -349,7 +349,7 @@ function SearchContent() {
                 content: q,
             };
             setMessages([userMsg]);
-            streamSearch([userMsg], selectedModel, threadId);
+            streamSearch([userMsg], selectedModel);
         }
     }, [q, streamSearch, selectedModel]);
 
@@ -385,7 +385,7 @@ function SearchContent() {
         const updatedMessages = [...messages, userMsg];
         setMessages(updatedMessages);
         setFollowUpInput("");
-        await streamSearch(updatedMessages, selectedModel, currentThreadId || Date.now().toString());
+        await streamSearch(updatedMessages, selectedModel);
     };
 
     const copyAnswer = (id: string, content: string) => {
@@ -438,14 +438,17 @@ function SearchContent() {
             <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 components={{
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
                     p: ({ children }: any) => {
                         const processed = processChildrenForCitations(children, msgSources);
                         return <p>{processed}</p>;
                     },
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
                     li: ({ children, ...props }: any) => {
                         const processed = processChildrenForCitations(children, msgSources);
                         return <li {...props}>{processed}</li>;
                     },
+                    // eslint-disable-next-line @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any
                     a: ({ node, ...props }: any) => {
                         return (
                             <a
