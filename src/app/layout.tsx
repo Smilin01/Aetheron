@@ -6,10 +6,10 @@ import { ThemeProvider } from "@/components/ThemeProvider";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Perplix — AI Search Engine",
+  title: "Aetheron — AI Search Engine",
   description:
     "A lightweight, no-account-required AI answer engine powered by Groq, DuckDuckGo, and Jina Reader.",
-  keywords: ["AI search", "answer engine", "Perplexity alternative", "RAG", "Groq"],
+  keywords: ["AI search", "answer engine", "Aetheron alternative", "RAG", "Groq"],
 };
 
 export default function RootLayout({

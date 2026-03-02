@@ -13,34 +13,50 @@ import {
     Loader2,
     Link as LinkIcon,
     MessageSquare,
-    Quote,
     Copy,
     Check,
     Sun,
     Moon,
     ExternalLink,
     ChevronDown,
-    Zap,
+    Globe2,
+    Layers,
+    Activity,
+    CheckCircle2,
+    XCircle,
+    PanelLeftClose,
+    PanelLeftOpen,
+    Plus,
+    Trash2,
+    Clock,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { motion, AnimatePresence } from "framer-motion";
 import { useTheme } from "@/components/ThemeProvider";
+import Image from "next/image";
 
-interface Source {
-    title: string;
-    url: string;
-    favicon: string;
-    snippet: string;
+import {
+    type Source,
+    type Message,
+    type ChatThread,
+    Sidebar,
+    loadThreads,
+    saveThread,
+    deleteThread,
+} from "@/components/Sidebar";
+
+// ─── Types ──────────────────────────────────────────────────
+interface ProcessStep {
+    type: "step" | "reading" | "read_done";
+    message: string;
+    url?: string;
+    hostname?: string;
+    success?: boolean;
+    timestamp: number;
 }
 
-interface Message {
-    id: string;
-    role: "user" | "assistant";
-    content: string;
-}
-
-// Available Groq models with best free-tier limits
+// Available Groq models
 const MODELS = [
     { id: "meta-llama/llama-4-scout-17b-16e-instruct", label: "Llama 4 Scout", badge: "30K TPM" },
     { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B", badge: "12K TPM" },
@@ -48,11 +64,94 @@ const MODELS = [
     { id: "qwen/qwen3-32b", label: "Qwen 3 32B", badge: "6K TPM" },
 ];
 
+// ─── Inline Citation Component ──────────────────────────────
+function CitationBadge({ sourceIndex, sources }: { sourceIndex: number; sources: Source[] }) {
+    const [showPopup, setShowPopup] = useState(false);
+    const source = sources[sourceIndex - 1];
+    const popupRef = useRef<HTMLDivElement>(null);
+
+    if (!source) {
+        return (
+            <span className="inline-flex items-center justify-center w-[18px] h-[18px] rounded-full bg-indigo-500/15 text-indigo-400 text-[10px] font-bold mx-0.5 align-super cursor-default">
+                {sourceIndex}
+            </span>
+        );
+    }
+
+    const hostname = (() => {
+        try { return new URL(source.url).hostname.replace("www.", ""); }
+        catch { return source.url; }
+    })();
+
+    return (
+        <span
+            className="relative inline-block"
+            onMouseEnter={() => setShowPopup(true)}
+            onMouseLeave={() => setShowPopup(false)}
+        >
+            <a
+                href={source.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 text-[11px] font-semibold no-underline transition-all cursor-pointer align-baseline mx-0.5 border border-indigo-500/10 hover:border-indigo-500/25"
+                onClick={(e) => e.stopPropagation()}
+            >
+                <span>{hostname}</span>
+                <span className="text-[9px] opacity-60">+{sourceIndex}</span>
+            </a>
+
+            <AnimatePresence>
+                {showPopup && (
+                    <motion.span
+                        ref={popupRef}
+                        initial={{ opacity: 0, y: 4, scale: 0.96 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 4, scale: 0.96 }}
+                        transition={{ duration: 0.15 }}
+                        className="absolute left-0 top-full mt-2 w-80 bg-card/95 backdrop-blur-xl border border-border/60 rounded-xl shadow-2xl shadow-black/25 p-3.5 z-[100] pointer-events-auto flex flex-col"
+                        style={{ minWidth: "280px" }}
+                    >
+                        <span className="flex items-center gap-2 mb-2">
+                            <span className="w-5 h-5 rounded-full bg-indigo-500/15 text-indigo-400 text-[10px] font-bold flex items-center justify-center shrink-0">
+                                {sourceIndex}
+                            </span>
+                            {source.favicon ? (
+                                <img src={source.favicon} alt="" className="w-4 h-4 rounded-sm shrink-0" />
+                            ) : (
+                                <Globe2 className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                            )}
+                            <span className="text-[11px] text-muted-foreground truncate">{hostname}</span>
+                        </span>
+                        <span className="text-sm font-semibold text-foreground leading-snug mb-1.5 line-clamp-2 block">
+                            {source.title || "Untitled"}
+                        </span>
+                        {source.snippet && (
+                            <span className="text-xs text-muted-foreground leading-relaxed line-clamp-3 mb-2 block">
+                                {source.snippet}
+                            </span>
+                        )}
+                        <a
+                            href={source.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-1 text-[11px] text-indigo-400 hover:text-indigo-300 no-underline font-medium transition-colors mt-auto"
+                        >
+                            Open source <ExternalLink className="w-3 h-3" />
+                        </a>
+                    </motion.span>
+                )}
+            </AnimatePresence>
+        </span>
+    );
+}
+
+// ─── Main Search Content ────────────────────────────────────
 function SearchContent() {
     const searchParams = useSearchParams();
     const router = useRouter();
     const { theme, toggleTheme } = useTheme();
     const q = searchParams.get("q") || "";
+    const threadParam = searchParams.get("thread") || "";
 
     const [sources, setSources] = useState<Source[]>([]);
     const [isSearching, setIsSearching] = useState(false);
@@ -64,9 +163,24 @@ function SearchContent() {
     const [showModelPicker, setShowModelPicker] = useState(false);
     const [headerInput, setHeaderInput] = useState(q);
 
+    // Process state
+    const [processSteps, setProcessSteps] = useState<ProcessStep[]>([]);
+    const [activeUrls, setActiveUrls] = useState<Map<string, { hostname: string; status: "reading" | "done" | "failed" }>>(new Map());
+    const [isProcessOpen, setIsProcessOpen] = useState(true);
+
+    // Sidebar & thread state
+    const [sidebarOpen, setSidebarOpen] = useState(false);
+    const [threads, setThreads] = useState<ChatThread[]>([]);
+    const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
+
     const scrollRef = useRef<HTMLDivElement>(null);
     const hasSearched = useRef(false);
     const modelPickerRef = useRef<HTMLDivElement>(null);
+
+    // Load threads from localStorage on mount
+    useEffect(() => {
+        setThreads(loadThreads());
+    }, []);
 
     // Close model picker on outside click
     useEffect(() => {
@@ -79,10 +193,47 @@ function SearchContent() {
         return () => document.removeEventListener("mousedown", handler);
     }, []);
 
+    // Save current thread to localStorage whenever messages/sources change
+    useEffect(() => {
+        if (currentThreadId && messages.length > 0) {
+            const firstUserMsg = messages.find((m) => m.role === "user");
+            const title = firstUserMsg?.content.slice(0, 60) || "New Thread";
+            const thread: ChatThread = {
+                id: currentThreadId,
+                title,
+                messages,
+                sources,
+                createdAt: threads.find((t) => t.id === currentThreadId)?.createdAt || Date.now(),
+                updatedAt: Date.now(),
+            };
+            saveThread(thread);
+            setThreads(loadThreads());
+        }
+    }, [messages, sources, currentThreadId]);
+
+    // Load a thread from URL param
+    useEffect(() => {
+        if (threadParam && !hasSearched.current) {
+            const thread = loadThreads().find((t) => t.id === threadParam);
+            if (thread) {
+                setCurrentThreadId(thread.id);
+                setMessages(thread.messages);
+                setSources(thread.sources);
+                setHeaderInput(thread.title);
+                hasSearched.current = true;
+                return;
+            }
+        }
+    }, [threadParam]);
+
     const streamSearch = useCallback(
-        async (allMessages: Message[], model: string) => {
+        async (allMessages: Message[], model: string, threadId: string) => {
             setIsSearching(true);
             setIsStreaming(true);
+            setProcessSteps([]);
+            setActiveUrls(new Map());
+            setIsProcessOpen(true);
+            setSources([]);
 
             try {
                 const res = await fetch("/api/search", {
@@ -99,18 +250,6 @@ function SearchContent() {
 
                 if (!res.ok) throw new Error("Search failed");
 
-                // Parse sources from header
-                const sourcesHeader = res.headers.get("x-sources");
-                if (sourcesHeader) {
-                    try {
-                        setSources(JSON.parse(decodeURIComponent(sourcesHeader)));
-                    } catch {
-                        /* skip */
-                    }
-                }
-                setIsSearching(false);
-
-                // Stream response body
                 const reader = res.body?.getReader();
                 if (!reader) return;
 
@@ -122,32 +261,62 @@ function SearchContent() {
                 ]);
 
                 let fullText = "";
+                let buffer = "";
+
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
-                    const chunk = decoder.decode(value, { stream: true });
 
-                    // ai SDK v6 UI message stream: SSE format with data: {"type":"text-delta","delta":"..."}
-                    const lines = chunk.split("\n");
-                    for (const line of lines) {
-                        const trimmed = line.trim();
-                        if (trimmed.startsWith("data: ")) {
-                            try {
-                                const data = JSON.parse(trimmed.slice(6));
-                                if (data.type === "text-delta" && data.delta) {
-                                    fullText += data.delta;
+                    buffer += decoder.decode(value, { stream: true });
+                    const parts = buffer.split("\n\n");
+                    buffer = parts.pop() || "";
+
+                    for (const part of parts) {
+                        const lines = part.split("\n");
+                        for (const line of lines) {
+                            if (line.startsWith("data: ")) {
+                                try {
+                                    const data = JSON.parse(line.slice(6));
+                                    if (data.type === "step") {
+                                        setProcessSteps((prev) => {
+                                            if (prev.length > 0 && prev[prev.length - 1].message === data.message) return prev;
+                                            return [...prev, { type: "step", message: data.message, timestamp: Date.now() }];
+                                        });
+                                    } else if (data.type === "reading_url") {
+                                        setActiveUrls((prev) => {
+                                            const next = new Map(prev);
+                                            next.set(data.url, { hostname: data.hostname, status: "reading" });
+                                            return next;
+                                        });
+                                        setProcessSteps((prev) => [
+                                            ...prev,
+                                            { type: "reading", message: `Reading ${data.hostname}...`, url: data.url, hostname: data.hostname, timestamp: Date.now() }
+                                        ]);
+                                    } else if (data.type === "read_complete") {
+                                        setActiveUrls((prev) => {
+                                            const next = new Map(prev);
+                                            next.set(data.url, { hostname: data.hostname, status: data.success ? "done" : "failed" });
+                                            return next;
+                                        });
+                                    } else if (data.type === "sources") {
+                                        setSources(data.sources);
+                                    } else if (data.type === "text-delta" && data.delta) {
+                                        setIsProcessOpen(false);
+                                        fullText += data.delta;
+                                        setMessages((prev) =>
+                                            prev.map((m) =>
+                                                m.id === assistantId ? { ...m, content: fullText } : m
+                                            )
+                                        );
+                                    } else if (data.type === "error") {
+                                        console.error("Server streaming error:", data.message);
+                                    }
+                                } catch {
+                                    /* skip non-JSON lines */
                                 }
-                            } catch {
-                                /* skip non-JSON lines */
                             }
                         }
                     }
-
-                    setMessages((prev) =>
-                        prev.map((m) =>
-                            m.id === assistantId ? { ...m, content: fullText } : m
-                        )
-                    );
                 }
             } catch (error) {
                 console.error("Stream error:", error);
@@ -157,8 +326,7 @@ function SearchContent() {
                     {
                         id: errId,
                         role: "assistant",
-                        content:
-                            "Sorry, something went wrong. Please check your connection and try again.",
+                        content: "Sorry, something went wrong. Please check your connection and try again.",
                     },
                 ]);
             } finally {
@@ -173,22 +341,30 @@ function SearchContent() {
     useEffect(() => {
         if (q && !hasSearched.current) {
             hasSearched.current = true;
+            const threadId = Date.now().toString();
+            setCurrentThreadId(threadId);
             const userMsg: Message = {
                 id: Date.now().toString(),
                 role: "user",
                 content: q,
             };
             setMessages([userMsg]);
-            streamSearch([userMsg], selectedModel);
+            streamSearch([userMsg], selectedModel, threadId);
         }
     }, [q, streamSearch, selectedModel]);
 
-    // Auto-scroll
+    // Auto-scroll to bottom of the page when new messages arrive
     useEffect(() => {
-        if (scrollRef.current) {
-            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        if (isStreaming) {
+            // Use requestAnimationFrame to let the browser paint the new DOM nodes first
+            requestAnimationFrame(() => {
+                window.scrollTo({
+                    top: document.documentElement.scrollHeight,
+                    behavior: "smooth" // smooth for better UX
+                });
+            });
         }
-    }, [messages]);
+    }, [messages, isStreaming]);
 
     const handleHeaderSearch = (e: React.FormEvent) => {
         e.preventDefault();
@@ -209,13 +385,40 @@ function SearchContent() {
         const updatedMessages = [...messages, userMsg];
         setMessages(updatedMessages);
         setFollowUpInput("");
-        await streamSearch(updatedMessages, selectedModel);
+        await streamSearch(updatedMessages, selectedModel, currentThreadId || Date.now().toString());
     };
 
     const copyAnswer = (id: string, content: string) => {
         navigator.clipboard.writeText(content);
         setCopied(id);
         setTimeout(() => setCopied(null), 2000);
+    };
+
+    const handleSelectThread = (thread: ChatThread) => {
+        setCurrentThreadId(thread.id);
+        setMessages(thread.messages);
+        setSources(thread.sources);
+        setHeaderInput(thread.title);
+        hasSearched.current = true;
+        setProcessSteps([]);
+        setActiveUrls(new Map());
+        setIsProcessOpen(false);
+        setSidebarOpen(false);
+        // Update URL without triggering a new search
+        window.history.replaceState(null, "", `/search?thread=${thread.id}`);
+    };
+
+    const handleNewThread = () => {
+        setSidebarOpen(false);
+        router.push("/");
+    };
+
+    const handleDeleteThread = (id: string) => {
+        deleteThread(id);
+        setThreads(loadThreads());
+        if (id === currentThreadId) {
+            handleNewThread();
+        }
     };
 
     const selectedModelLabel =
@@ -229,330 +432,456 @@ function SearchContent() {
         }
     };
 
+    // Parse citations in content → render CitationBadge components inline
+    const renderCitedMarkdown = (content: string, msgSources: Source[]) => {
+        return (
+            <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                    p: ({ children }: any) => {
+                        const processed = processChildrenForCitations(children, msgSources);
+                        return <p>{processed}</p>;
+                    },
+                    li: ({ children, ...props }: any) => {
+                        const processed = processChildrenForCitations(children, msgSources);
+                        return <li {...props}>{processed}</li>;
+                    },
+                    a: ({ node, ...props }: any) => {
+                        return (
+                            <a
+                                {...props}
+                                className="text-indigo-400 hover:text-indigo-300 underline underline-offset-4 decoration-indigo-500/30 hover:decoration-indigo-400/50 transition-colors"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                            />
+                        );
+                    },
+                }}
+            >
+                {content}
+            </ReactMarkdown>
+        );
+    };
+
+    const processChildrenForCitations = (children: React.ReactNode, msgSources: Source[]): React.ReactNode => {
+        if (!children) return children;
+        const result: React.ReactNode[] = [];
+        const childArray = Array.isArray(children) ? children : [children];
+        childArray.forEach((child, idx) => {
+            if (typeof child === "string") {
+                const parts = child.split(/(\[\d+\])/g);
+                parts.forEach((part, partIdx) => {
+                    const citationMatch = part.match(/^\[(\d+)\]$/);
+                    if (citationMatch) {
+                        const sourceNum = parseInt(citationMatch[1]);
+                        result.push(
+                            <CitationBadge
+                                key={`cite-${idx}-${partIdx}-${sourceNum}`}
+                                sourceIndex={sourceNum}
+                                sources={msgSources}
+                            />
+                        );
+                    } else if (part) {
+                        result.push(part);
+                    }
+                });
+            } else {
+                result.push(child);
+            }
+        });
+        return result;
+    };
+
     return (
-        <div className="flex flex-col min-h-screen bg-background">
-            {/* ── HEADER ────────────────────────────────────────────── */}
-            <header className="sticky top-0 z-50 bg-background/80 backdrop-blur-xl border-b border-border/40">
-                <div className="max-w-6xl mx-auto px-4 h-16 flex items-center gap-4">
-                    {/* Logo */}
-                    <button
-                        onClick={() => router.push("/")}
-                        className="text-xl font-black bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-violet-400 hover:opacity-80 transition-opacity shrink-0"
-                    >
-                        Perplix
-                    </button>
+        <div className="flex min-h-screen bg-background">
+            {/* ── SIDEBAR ─────────────────────────────────────────── */}
+            <Sidebar
+                threads={threads}
+                currentThreadId={currentThreadId}
+                isOpen={sidebarOpen}
+                onToggle={() => setSidebarOpen(false)}
+                onSelectThread={handleSelectThread}
+                onNewThread={handleNewThread}
+                onDeleteThread={handleDeleteThread}
+            />
 
-                    {/* Search bar */}
-                    <form onSubmit={handleHeaderSearch} className="relative flex-1 group">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground group-focus-within:text-blue-400 transition-colors pointer-events-none" />
-                        <input
-                            type="text"
-                            value={headerInput}
-                            onChange={(e) => setHeaderInput(e.target.value)}
-                            placeholder="Search anything..."
-                            className="w-full bg-muted/60 border border-border/50 rounded-full pl-10 pr-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500/40 transition-all"
-                        />
-                    </form>
-
-                    {/* Model selector */}
-                    <div className="relative shrink-0" ref={modelPickerRef}>
+            {/* ── MAIN LAYOUT ─────────────────────────────────────── */}
+            <div className="flex-1 flex flex-col min-h-screen">
+                {/* ── HEADER ────────────────────────────────────────── */}
+                <header className="sticky top-0 z-30 bg-background/80 backdrop-blur-xl border-b border-border/40">
+                    <div className="max-w-6xl mx-auto px-4 h-16 flex items-center gap-3">
+                        {/* Sidebar toggle */}
                         <button
-                            onClick={() => setShowModelPicker((p) => !p)}
-                            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium bg-card border border-border/60 rounded-full hover:bg-accent transition-all"
+                            onClick={() => setSidebarOpen(!sidebarOpen)}
+                            className="shrink-0 p-2 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition-all"
+                            title={sidebarOpen ? "Close history" : "Open history"}
                         >
-                            <Zap className="w-3 h-3 text-amber-400" />
-                            <span className="hidden sm:inline">{selectedModelLabel}</span>
-                            <ChevronDown className="w-3 h-3 text-muted-foreground" />
+                            {sidebarOpen ? (
+                                <PanelLeftClose className="w-5 h-5" />
+                            ) : (
+                                <PanelLeftOpen className="w-5 h-5" />
+                            )}
                         </button>
 
+                        {/* Logo */}
+                        <button
+                            onClick={() => router.push("/")}
+                            className="hover:opacity-80 transition-opacity shrink-0 flex items-center"
+                        >
+                            <Image
+                                src="/logo-dark.png"
+                                alt="Aetheron"
+                                width={120}
+                                height={32}
+                                className="object-contain dark:hidden"
+                                priority
+                            />
+                            <Image
+                                src="/logo-light.png"
+                                alt="Aetheron"
+                                width={120}
+                                height={32}
+                                className="object-contain hidden dark:block"
+                                priority
+                            />
+                        </button>
+
+                        {/* Search bar */}
+                        <form onSubmit={handleHeaderSearch} className="relative flex-1 group">
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground group-focus-within:text-blue-400 transition-colors pointer-events-none" />
+                            <input
+                                type="text"
+                                value={headerInput}
+                                onChange={(e) => setHeaderInput(e.target.value)}
+                                placeholder="Search anything..."
+                                className="w-full bg-card/60 backdrop-blur-md border border-border/40 rounded-full pl-10 pr-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/40 transition-all shadow-inner"
+                            />
+                        </form>
+
+                        {/* Model selector */}
+                        <div className="relative shrink-0" ref={modelPickerRef}>
+                            <button
+                                onClick={() => setShowModelPicker((p) => !p)}
+                                className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium bg-card/50 backdrop-blur-md border border-border/40 rounded-full hover:bg-accent transition-all shadow-sm"
+                            >
+                                <Layers className="w-3 h-3 text-indigo-400" />
+                                <span className="hidden sm:inline">{selectedModelLabel}</span>
+                                <ChevronDown className="w-3 h-3 text-muted-foreground" />
+                            </button>
+
+                            <AnimatePresence>
+                                {showModelPicker && (
+                                    <motion.div
+                                        initial={{ opacity: 0, y: -8, scale: 0.97 }}
+                                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                                        exit={{ opacity: 0, y: -8, scale: 0.97 }}
+                                        transition={{ duration: 0.15 }}
+                                        className="absolute right-0 top-full mt-2 w-64 bg-card/90 backdrop-blur-xl border border-border/40 rounded-2xl shadow-2xl shadow-black/20 p-1.5 z-50"
+                                    >
+                                        {MODELS.map((m) => (
+                                            <button
+                                                key={m.id}
+                                                onClick={() => {
+                                                    setSelectedModel(m.id);
+                                                    setShowModelPicker(false);
+                                                }}
+                                                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left transition-all ${selectedModel === m.id
+                                                    ? "bg-indigo-500/10 text-indigo-400"
+                                                    : "hover:bg-accent text-foreground"
+                                                    }`}
+                                            >
+                                                <span className="text-sm font-medium">{m.label}</span>
+                                                <span className="text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full">
+                                                    {m.badge}
+                                                </span>
+                                            </button>
+                                        ))}
+                                    </motion.div>
+                                )}
+                            </AnimatePresence>
+                        </div>
+
+                        {/* Theme toggle */}
+                        <button
+                            onClick={toggleTheme}
+                            className="shrink-0 p-2 rounded-full bg-card border border-border/60 hover:bg-accent transition-all"
+                            aria-label="Toggle theme"
+                        >
+                            {theme === "dark" ? (
+                                <Sun className="w-4 h-4 text-amber-400" />
+                            ) : (
+                                <Moon className="w-4 h-4 text-blue-500" />
+                            )}
+                        </button>
+                    </div>
+                </header>
+
+                {/* ── MAIN CONTENT ──────────────────────────────────── */}
+                <main className="flex-1 flex flex-col max-w-4xl mx-auto w-full p-4 md:p-6 gap-6 pb-[200px]">
+                    <div className="flex-1 min-w-0 flex flex-col gap-6" ref={scrollRef}>
+                        {/* ── LIVE PROCESS INDICATOR ───────────────── */}
                         <AnimatePresence>
-                            {showModelPicker && (
+                            {processSteps.length > 0 && (
                                 <motion.div
-                                    initial={{ opacity: 0, y: -8, scale: 0.97 }}
-                                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                                    exit={{ opacity: 0, y: -8, scale: 0.97 }}
-                                    transition={{ duration: 0.15 }}
-                                    className="absolute right-0 top-full mt-2 w-64 bg-card border border-border/60 rounded-2xl shadow-xl p-1.5 z-50"
+                                    initial={{ opacity: 0, y: 10, height: 0 }}
+                                    animate={{ opacity: 1, y: 0, height: "auto" }}
+                                    exit={{ opacity: 0, height: 0, margin: 0 }}
+                                    className="mb-2 overflow-hidden"
                                 >
-                                    {MODELS.map((m) => (
+                                    <div className="border border-border/40 bg-card/40 backdrop-blur-md rounded-2xl shadow-sm overflow-hidden">
                                         <button
-                                            key={m.id}
-                                            onClick={() => {
-                                                setSelectedModel(m.id);
-                                                setShowModelPicker(false);
-                                            }}
-                                            className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left transition-all ${selectedModel === m.id
-                                                ? "bg-blue-500/10 text-blue-400"
-                                                : "hover:bg-accent text-foreground"
-                                                }`}
+                                            onClick={() => setIsProcessOpen(!isProcessOpen)}
+                                            className="w-full flex items-center justify-between p-4 hover:bg-accent/40 transition-colors"
                                         >
-                                            <span className="text-sm font-medium">{m.label}</span>
-                                            <span className="text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full">
-                                                {m.badge}
-                                            </span>
+                                            <div className="flex items-center gap-3">
+                                                <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${isSearching ? 'bg-indigo-500/10' : 'bg-emerald-500/10'}`}>
+                                                    {isSearching ? (
+                                                        <Loader2 className="w-4 h-4 text-indigo-400 animate-spin" />
+                                                    ) : (
+                                                        <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                                                    )}
+                                                </div>
+                                                <div className="flex flex-col items-start">
+                                                    <span className="text-sm font-semibold text-foreground">
+                                                        {isSearching ? "Researching..." : "Research complete"}
+                                                    </span>
+                                                    {isSearching && processSteps.length > 0 && (
+                                                        <span className="text-[11px] text-muted-foreground">
+                                                            {processSteps[processSteps.length - 1].message}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform duration-300 ${isProcessOpen ? 'rotate-180' : ''}`} />
                                         </button>
-                                    ))}
+
+                                        <AnimatePresence>
+                                            {isProcessOpen && (
+                                                <motion.div
+                                                    initial={{ height: 0, opacity: 0 }}
+                                                    animate={{ height: "auto", opacity: 1 }}
+                                                    exit={{ height: 0, opacity: 0 }}
+                                                    className="border-t border-border/40 bg-background/30"
+                                                >
+                                                    <div className="p-4 space-y-2">
+                                                        {processSteps.map((step, i) => (
+                                                            <motion.div
+                                                                key={i}
+                                                                initial={{ opacity: 0, x: -10 }}
+                                                                animate={{ opacity: 1, x: 0 }}
+                                                                transition={{ delay: i * 0.02 }}
+                                                                className="flex items-center gap-3"
+                                                            >
+                                                                {step.type === "reading" ? (
+                                                                    <>
+                                                                        <div className="w-5 h-5 rounded-md bg-indigo-500/10 flex items-center justify-center shrink-0">
+                                                                            {activeUrls.get(step.url || "")?.status === "reading" ? (
+                                                                                <Loader2 className="w-3 h-3 text-indigo-400 animate-spin" />
+                                                                            ) : activeUrls.get(step.url || "")?.status === "done" ? (
+                                                                                <Check className="w-3 h-3 text-emerald-400" />
+                                                                            ) : (
+                                                                                <XCircle className="w-3 h-3 text-red-400" />
+                                                                            )}
+                                                                        </div>
+                                                                        <div className="flex items-center gap-2 min-w-0">
+                                                                            <Globe2 className="w-3 h-3 text-indigo-400/70 shrink-0" />
+                                                                            <span className="text-xs text-foreground/80 font-medium truncate">
+                                                                                {step.hostname}
+                                                                            </span>
+                                                                            {activeUrls.get(step.url || "")?.status === "reading" && (
+                                                                                <span className="text-[10px] text-indigo-400/60 animate-pulse">reading...</span>
+                                                                            )}
+                                                                            {activeUrls.get(step.url || "")?.status === "done" && (
+                                                                                <span className="text-[10px] text-emerald-400/60">done</span>
+                                                                            )}
+                                                                        </div>
+                                                                    </>
+                                                                ) : (
+                                                                    <>
+                                                                        <div className="w-5 h-5 rounded-md flex items-center justify-center shrink-0">
+                                                                            <Activity className="w-3 h-3 text-muted-foreground/50" />
+                                                                        </div>
+                                                                        <span className="text-xs text-muted-foreground">
+                                                                            {step.message}
+                                                                        </span>
+                                                                    </>
+                                                                )}
+                                                            </motion.div>
+                                                        ))}
+                                                    </div>
+                                                </motion.div>
+                                            )}
+                                        </AnimatePresence>
+                                    </div>
                                 </motion.div>
                             )}
                         </AnimatePresence>
-                    </div>
 
-                    {/* Theme toggle */}
-                    <button
-                        onClick={toggleTheme}
-                        className="shrink-0 p-2 rounded-full bg-card border border-border/60 hover:bg-accent transition-all"
-                        aria-label="Toggle theme"
-                    >
-                        {theme === "dark" ? (
-                            <Sun className="w-4 h-4 text-amber-400" />
-                        ) : (
-                            <Moon className="w-4 h-4 text-blue-500" />
-                        )}
-                    </button>
-                </div>
-            </header>
-
-            {/* ── MAIN ──────────────────────────────────────────────── */}
-            <main className="flex-1 flex flex-col md:flex-row max-w-6xl mx-auto w-full p-4 md:p-6 gap-6 pb-36">
-                {/* Answer column */}
-                <div className="flex-1 min-w-0 overflow-y-auto" ref={scrollRef}>
-                    {/* Initial loading state */}
-                    {isSearching && messages.filter((m) => m.role === "assistant").length === 0 && (
-                        <motion.div
-                            initial={{ opacity: 0, y: 10 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            className="flex items-start gap-4 p-5 rounded-2xl border border-border/50 bg-card/50"
-                        >
-                            <div className="mt-0.5 w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-violet-500 flex items-center justify-center shrink-0">
-                                <Loader2 className="w-4 h-4 text-white animate-spin" />
-                            </div>
-                            <div className="space-y-2 flex-1">
-                                <p className="text-sm font-medium">Searching the web…</p>
-                                <div className="space-y-1.5">
-                                    {["Rewriting query with AI", "Fetching DuckDuckGo results", "Reading source pages with Jina"].map(
-                                        (step, i) => (
-                                            <motion.div
-                                                key={step}
-                                                initial={{ opacity: 0, x: -10 }}
-                                                animate={{ opacity: 1, x: 0 }}
-                                                transition={{ delay: i * 0.4 }}
-                                                className="flex items-center gap-2 text-xs text-muted-foreground"
-                                            >
-                                                <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
-                                                {step}
-                                            </motion.div>
-                                        )
-                                    )}
-                                </div>
-                            </div>
-                        </motion.div>
-                    )}
-
-                    <div className="space-y-5 mt-2">
+                        {/* ── SOURCES BAR ──────────────────────────── */}
                         <AnimatePresence>
-                            {messages.map((m) => (
+                            {sources.length > 0 && (
                                 <motion.div
-                                    key={m.id}
-                                    initial={{ opacity: 0, y: 12 }}
+                                    initial={{ opacity: 0, y: 10 }}
                                     animate={{ opacity: 1, y: 0 }}
                                     transition={{ duration: 0.3 }}
-                                    className={`flex gap-3 ${m.role === "user" ? "justify-end" : "justify-start"
-                                        }`}
+                                    className="mb-2"
                                 >
-                                    {m.role === "user" ? (
-                                        <div className="bg-gradient-to-r from-blue-600 to-violet-600 text-white px-5 py-3 rounded-2xl max-w-[85%] shadow-lg shadow-blue-500/10 text-sm font-medium">
-                                            {m.content}
+                                    <div className="flex items-center gap-2.5 mb-3">
+                                        <div className="w-6 h-6 rounded-lg bg-indigo-500/10 flex items-center justify-center">
+                                            <Layers className="w-3.5 h-3.5 text-indigo-400" />
                                         </div>
-                                    ) : (
-                                        <div className="bg-card border border-border/60 rounded-2xl px-6 py-5 w-full shadow-sm relative group/answer">
-                                            {/* Copy button */}
-                                            {m.content && (
-                                                <button
-                                                    onClick={() => copyAnswer(m.id, m.content)}
-                                                    className="absolute top-3 right-3 p-1.5 rounded-lg bg-muted/0 hover:bg-muted text-muted-foreground hover:text-foreground opacity-0 group-hover/answer:opacity-100 transition-all"
-                                                    title="Copy answer"
-                                                >
-                                                    {copied === m.id ? (
-                                                        <Check className="w-3.5 h-3.5 text-green-500" />
+                                        <span className="text-sm font-bold text-foreground">{sources.length} Sources</span>
+                                    </div>
+                                    <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+                                        {sources.map((s, idx) => (
+                                            <motion.a
+                                                key={idx}
+                                                id={`source-card-${idx + 1}`}
+                                                href={s.url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                initial={{ opacity: 0, x: 10 }}
+                                                animate={{ opacity: 1, x: 0 }}
+                                                transition={{ delay: idx * 0.04 }}
+                                                className="flex flex-col min-w-[200px] max-w-[220px] p-3 bg-card/50 backdrop-blur-sm hover:bg-card/80 border border-border/40 hover:border-indigo-500/30 rounded-xl transition-all group shadow-sm hover:shadow-md shrink-0"
+                                            >
+                                                <div className="flex items-center gap-1.5 mb-1.5">
+                                                    <span className="bg-indigo-500/10 text-indigo-400 text-[9px] w-4 h-4 flex items-center justify-center rounded-full font-bold shrink-0">
+                                                        {idx + 1}
+                                                    </span>
+                                                    {s.favicon ? (
+                                                        <img src={s.favicon} alt="" className="w-3 h-3 rounded-sm shrink-0" />
                                                     ) : (
-                                                        <Copy className="w-3.5 h-3.5" />
+                                                        <LinkIcon className="w-3 h-3 text-muted-foreground shrink-0" />
                                                     )}
-                                                </button>
-                                            )}
-
-                                            <div className="prose prose-neutral dark:prose-invert prose-p:leading-relaxed prose-headings:font-semibold prose-a:text-blue-400 prose-code:text-blue-300 prose-code:bg-blue-500/10 prose-code:rounded prose-code:px-1 max-w-none text-[15px]">
-                                                <ReactMarkdown
-                                                    remarkPlugins={[remarkGfm]}
-                                                    components={{
-                                                        a: ({ node, ...props }: any) => {
-                                                            const href = props.href || "";
-                                                            if (href.startsWith("#source-")) {
-                                                                const sourceId = href.split("-")[1];
-                                                                return (
-                                                                    <a
-                                                                        href={`#source-card-${sourceId}`}
-                                                                        className="inline-flex text-[10px] items-center justify-center w-5 h-5 rounded-full bg-blue-500/15 text-blue-400 hover:bg-blue-500/25 mx-0.5 no-underline font-bold transition-colors align-super"
-                                                                        onClick={(e) => {
-                                                                            e.preventDefault();
-                                                                            document
-                                                                                .getElementById(`source-card-${sourceId}`)
-                                                                                ?.scrollIntoView({ behavior: "smooth" });
-                                                                        }}
-                                                                    >
-                                                                        {sourceId}
-                                                                    </a>
-                                                                );
-                                                            }
-                                                            return (
-                                                                <a
-                                                                    {...props}
-                                                                    className="text-blue-400 hover:text-blue-300 underline underline-offset-4 decoration-blue-500/30 hover:decoration-blue-400/50 transition-colors"
-                                                                    target="_blank"
-                                                                    rel="noopener noreferrer"
-                                                                />
-                                                            );
-                                                        },
-                                                    }}
-                                                >
-                                                    {m.content}
-                                                </ReactMarkdown>
-                                            </div>
-                                        </div>
-                                    )}
-                                </motion.div>
-                            ))}
-                        </AnimatePresence>
-
-                        {/* Typing indicator */}
-                        {isStreaming &&
-                            messages.length > 0 &&
-                            messages[messages.length - 1].role === "user" && (
-                                <motion.div
-                                    initial={{ opacity: 0 }}
-                                    animate={{ opacity: 1 }}
-                                    className="bg-card border border-border/60 px-6 py-5 rounded-2xl w-full flex items-center gap-3"
-                                >
-                                    <div className="flex gap-1">
-                                        {[0, 150, 300].map((delay) => (
-                                            <div
-                                                key={delay}
-                                                className="h-2 w-2 rounded-full bg-gradient-to-b from-blue-400 to-violet-400 animate-bounce"
-                                                style={{ animationDelay: `${delay}ms` }}
-                                            />
+                                                    <span className="text-[10px] text-muted-foreground truncate group-hover:text-foreground transition-colors">
+                                                        {hostname(s.url)}
+                                                    </span>
+                                                    <ExternalLink className="w-2.5 h-2.5 text-muted-foreground/30 shrink-0 ml-auto group-hover:text-muted-foreground transition-colors" />
+                                                </div>
+                                                <h4 className="text-[11px] font-semibold line-clamp-2 leading-snug group-hover:text-indigo-400 transition-colors">
+                                                    {s.title || "Untitled Source"}
+                                                </h4>
+                                            </motion.a>
                                         ))}
                                     </div>
-                                    <span className="text-sm text-muted-foreground">
-                                        Generating answer with{" "}
-                                        <span className="text-blue-400 font-medium">
-                                            {selectedModelLabel}
-                                        </span>
-                                        …
-                                    </span>
                                 </motion.div>
                             )}
-                    </div>
-                </div>
+                        </AnimatePresence>
 
-                {/* ── SIDEBAR: Sources ──────────────────────────────── */}
-                <aside className="w-full md:w-72 lg:w-80 shrink-0">
-                    <AnimatePresence mode="wait">
-                        {sources.length > 0 ? (
-                            <motion.div
-                                key="sources"
-                                initial={{ opacity: 0, x: 20 }}
-                                animate={{ opacity: 1, x: 0 }}
-                                transition={{ duration: 0.4 }}
-                            >
-                                <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-widest mb-3 flex items-center gap-2">
-                                    <Quote className="w-3.5 h-3.5 text-blue-400" />
-                                    Sources
-                                </h3>
-                                <div className="flex flex-col gap-2">
-                                    {sources.map((s, idx) => (
-                                        <motion.a
-                                            key={idx}
-                                            id={`source-card-${idx + 1}`}
-                                            href={s.url}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            initial={{ opacity: 0, y: 8 }}
-                                            animate={{ opacity: 1, y: 0 }}
-                                            transition={{ delay: idx * 0.07 }}
-                                            className="flex flex-col p-3.5 bg-card hover:bg-accent/40 border border-border/60 hover:border-blue-500/20 rounded-xl transition-all group shadow-sm hover:shadow-md"
-                                        >
-                                            <div className="flex items-center gap-2 mb-2 overflow-hidden">
-                                                <span className="bg-blue-500/10 text-blue-400 text-[10px] w-5 h-5 flex items-center justify-center rounded-full font-bold shrink-0">
-                                                    {idx + 1}
-                                                </span>
-                                                {s.favicon ? (
-                                                    <img
-                                                        src={s.favicon}
-                                                        alt=""
-                                                        className="w-3.5 h-3.5 rounded-sm shrink-0"
-                                                    />
-                                                ) : (
-                                                    <LinkIcon className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                                                )}
-                                                <span className="text-[11px] text-muted-foreground truncate group-hover:text-foreground transition-colors">
-                                                    {hostname(s.url)}
-                                                </span>
-                                                <ExternalLink className="w-3 h-3 text-muted-foreground/40 shrink-0 ml-auto group-hover:text-muted-foreground transition-colors" />
+                        {/* ── MESSAGES ─────────────────────────────── */}
+                        <div className="space-y-5">
+                            <AnimatePresence>
+                                {messages.map((m) => (
+                                    <motion.div
+                                        key={m.id}
+                                        initial={{ opacity: 0, y: 12 }}
+                                        animate={{ opacity: 1, y: 0 }}
+                                        transition={{ duration: 0.3 }}
+                                        className={`flex gap-3 ${m.role === "user" ? "justify-end" : "justify-start"}`}
+                                    >
+                                        {m.role === "user" ? (
+                                            <div className="bg-foreground text-background px-5 py-3.5 rounded-2xl max-w-[85%] shadow-lg shadow-foreground/5 text-[15px] font-medium leading-relaxed">
+                                                {m.content}
                                             </div>
-                                            <h4 className="text-xs font-semibold line-clamp-2 leading-snug group-hover:text-blue-400 transition-colors">
-                                                {s.title || "Untitled Source"}
-                                            </h4>
-                                            {s.snippet && (
-                                                <p className="text-[11px] text-muted-foreground/70 line-clamp-2 mt-1 leading-relaxed">
-                                                    {s.snippet}
-                                                </p>
-                                            )}
-                                        </motion.a>
-                                    ))}
-                                </div>
-                            </motion.div>
-                        ) : isSearching ? (
-                            <motion.div key="skeleton" className="space-y-3">
-                                <div className="h-4 w-20 bg-muted rounded-full animate-pulse" />
-                                {[1, 2, 3].map((i) => (
-                                    <div
-                                        key={i}
-                                        className="h-24 bg-card rounded-xl animate-pulse border border-border/40"
-                                    />
-                                ))}
-                            </motion.div>
-                        ) : null}
-                    </AnimatePresence>
-                </aside>
-            </main>
+                                        ) : (
+                                            <div className="bg-card/40 backdrop-blur-sm border border-border/40 rounded-3xl px-6 py-6 w-full shadow-sm relative group/answer">
+                                                {/* Aetheron badge */}
+                                                <div className="flex items-center gap-2 mb-4">
+                                                    <Image
+                                                        src="/logo-mark.png"
+                                                        alt="Aetheron"
+                                                        width={40}
+                                                        height={40}
+                                                        className="rounded-md"
+                                                    />
+                                                    <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Answer</span>
+                                                </div>
 
-            {/* ── FLOATING FOLLOW-UP BAR ────────────────────────── */}
-            {messages.length > 0 && (
-                <div className="fixed bottom-0 left-0 right-0 z-40 pointer-events-none">
-                    <div className="bg-gradient-to-t from-background via-background/95 to-transparent pt-12 pb-5 px-4">
-                        <div className="max-w-3xl mx-auto pointer-events-auto">
-                            <form
-                                onSubmit={handleFollowUp}
-                                className="relative flex items-center"
-                            >
-                                <input
-                                    className="w-full bg-card/90 backdrop-blur-xl border border-border/60 focus:border-blue-500/40 text-foreground rounded-full pl-6 pr-14 py-4 text-sm focus:outline-none focus:ring-4 focus:ring-blue-500/10 shadow-2xl transition-all placeholder:text-muted-foreground/50"
-                                    value={followUpInput}
-                                    onChange={(e) => setFollowUpInput(e.target.value)}
-                                    placeholder={`Ask a follow-up…`}
-                                    disabled={isStreaming}
-                                />
-                                <button
-                                    type="submit"
-                                    disabled={isStreaming || !followUpInput.trim()}
-                                    className="absolute right-2 p-2.5 bg-gradient-to-r from-blue-600 to-violet-600 text-white rounded-full disabled:opacity-40 hover:from-blue-500 hover:to-violet-500 transition-all shadow-lg shadow-blue-500/20 disabled:shadow-none"
+                                                {/* Copy button */}
+                                                {m.content && (
+                                                    <button
+                                                        onClick={() => copyAnswer(m.id, m.content)}
+                                                        className="absolute top-4 right-4 p-1.5 rounded-lg bg-muted/0 hover:bg-muted text-muted-foreground hover:text-foreground opacity-0 group-hover/answer:opacity-100 transition-all"
+                                                        title="Copy answer"
+                                                    >
+                                                        {copied === m.id ? (
+                                                            <Check className="w-3.5 h-3.5 text-green-500" />
+                                                        ) : (
+                                                            <Copy className="w-3.5 h-3.5" />
+                                                        )}
+                                                    </button>
+                                                )}
+
+                                                <div className="prose prose-neutral dark:prose-invert prose-p:leading-relaxed prose-headings:font-semibold prose-a:text-indigo-400 prose-code:text-indigo-300 prose-code:bg-indigo-500/10 prose-code:rounded prose-code:px-1 max-w-none text-[15px] prose-h2:text-lg prose-h2:mt-6 prose-h2:mb-3 prose-h3:text-base prose-h3:mt-4 prose-h3:mb-2 prose-ul:my-2 prose-li:my-0.5">
+                                                    {renderCitedMarkdown(m.content, sources)}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </motion.div>
+                                ))}
+                            </AnimatePresence>
+
+                            {/* Typing indicator */}
+                            {isStreaming &&
+                                messages.length > 0 &&
+                                messages[messages.length - 1].role === "user" && (
+                                    <motion.div
+                                        initial={{ opacity: 0 }}
+                                        animate={{ opacity: 1 }}
+                                        className="bg-card/40 border border-border/40 px-6 py-5 rounded-2xl w-full flex items-center gap-3"
+                                    >
+                                        <motion.div
+                                            animate={{ rotate: 360 }}
+                                            transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+                                            className="shrink-0"
+                                        >
+                                            <Image src="/logo-mark.png" alt="" width={20} height={20} className="rounded-sm opacity-80" />
+                                        </motion.div>
+                                        <span className="text-sm text-muted-foreground font-medium">
+                                            Thinking with{" "}
+                                            <span className="text-indigo-400 font-semibold">
+                                                {selectedModelLabel}
+                                            </span>
+                                            …
+                                        </span>
+                                    </motion.div>
+                                )}
+                        </div>
+                        {/* Spacer to allow scrolling past the floating input bar */}
+                        <div className="h-40 shrink-0 pointer-events-none w-full" />
+                    </div>
+                </main>
+
+                {/* ── FLOATING FOLLOW-UP BAR ───────────────────────── */}
+                {messages.length > 0 && (
+                    <div className="fixed bottom-0 left-0 right-0 z-30 pointer-events-none">
+                        <div className="bg-gradient-to-t from-background via-background/95 to-transparent pt-12 pb-5 px-4">
+                            <div className="max-w-3xl mx-auto pointer-events-auto">
+                                <form
+                                    onSubmit={handleFollowUp}
+                                    className="relative flex items-center"
                                 >
-                                    <MessageSquare className="w-4 h-4" />
-                                </button>
-                            </form>
+                                    <input
+                                        className="w-full bg-card/80 backdrop-blur-xl border border-border/40 text-foreground rounded-full pl-6 pr-14 py-4 text-base focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 shadow-2xl transition-all placeholder:text-muted-foreground/40"
+                                        value={followUpInput}
+                                        onChange={(e) => setFollowUpInput(e.target.value)}
+                                        placeholder="Ask a follow-up…"
+                                        disabled={isStreaming}
+                                    />
+                                    <button
+                                        type="submit"
+                                        disabled={isStreaming || !followUpInput.trim()}
+                                        className="absolute right-2 p-3 bg-foreground text-background rounded-full disabled:opacity-20 hover:bg-foreground/90 transition-all shadow-lg shadow-foreground/10 disabled:shadow-none"
+                                    >
+                                        <MessageSquare className="w-4 h-4" />
+                                    </button>
+                                </form>
+                            </div>
                         </div>
                     </div>
-                </div>
-            )}
+                )}
+            </div>
         </div>
     );
 }
@@ -562,7 +891,12 @@ export default function SearchPage() {
         <Suspense
             fallback={
                 <div className="flex min-h-screen items-center justify-center bg-background">
-                    <Loader2 className="w-6 h-6 animate-spin text-blue-400" />
+                    <motion.div
+                        animate={{ rotate: 360 }}
+                        transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+                    >
+                        <Image src="/logo-mark.png" alt="Loading" width={32} height={32} className="opacity-70" />
+                    </motion.div>
                 </div>
             }
         >
