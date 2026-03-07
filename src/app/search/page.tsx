@@ -28,6 +28,7 @@ import {
     XCircle,
     PanelLeftClose,
     PanelLeftOpen,
+    Github,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -604,10 +605,21 @@ function SearchContent() {
                             </AnimatePresence>
                         </div>
 
+                        {/* Github repo */}
+                        <a
+                            href="https://github.com/Smilin01/Aetheron"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="shrink-0 p-2 rounded-full bg-card border border-border/60 hover:bg-accent transition-all text-muted-foreground hover:text-foreground"
+                            aria-label="GitHub Repository"
+                        >
+                            <Github className="w-4 h-4" />
+                        </a>
+
                         {/* Theme toggle */}
                         <button
                             onClick={toggleTheme}
-                            className="shrink-0 p-2 rounded-full bg-card border border-border/60 hover:bg-accent transition-all"
+                            className="shrink-0 p-2 rounded-full bg-card border border-border/60 hover:bg-accent transition-all text-muted-foreground hover:text-foreground"
                             aria-label="Toggle theme"
                         >
                             {theme === "dark" ? (

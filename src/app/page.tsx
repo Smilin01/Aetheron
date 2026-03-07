@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Search, Sparkles, BookOpen, Globe, ArrowRight, Sun, Moon, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { Search, Sparkles, BookOpen, Globe, ArrowRight, Sun, Moon, PanelLeftClose, PanelLeftOpen, Github } from "lucide-react";
 import { motion } from "framer-motion";
 import { useTheme } from "@/components/ThemeProvider";
 import Image from "next/image";
@@ -92,18 +92,29 @@ export default function Home() {
           )}
         </button>
 
-        {/* Theme toggle */}
-        <button
-          onClick={toggleTheme}
-          className="absolute top-6 right-6 z-20 p-2.5 rounded-full bg-card/40 backdrop-blur-md border border-border/40 hover:bg-accent transition-all shadow-sm hover:shadow-md text-muted-foreground hover:text-foreground"
-          aria-label="Toggle theme"
-        >
-          {theme === "dark" ? (
-            <Sun className="w-5 h-5 text-amber-400" />
-          ) : (
-            <Moon className="w-5 h-5 text-zinc-900" />
-          )}
-        </button>
+        {/* Header Actions */}
+        <div className="absolute top-6 right-6 z-20 flex items-center gap-3">
+          <a
+            href="https://github.com/Smilin01/Aetheron"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="p-2.5 rounded-full bg-card/40 backdrop-blur-md border border-border/40 hover:bg-accent transition-all shadow-sm hover:shadow-md text-muted-foreground hover:text-foreground"
+            aria-label="GitHub Repository"
+          >
+            <Github className="w-5 h-5" />
+          </a>
+          <button
+            onClick={toggleTheme}
+            className="p-2.5 rounded-full bg-card/40 backdrop-blur-md border border-border/40 hover:bg-accent transition-all shadow-sm hover:shadow-md text-muted-foreground hover:text-foreground"
+            aria-label="Toggle theme"
+          >
+            {theme === "dark" ? (
+              <Sun className="w-5 h-5 text-amber-400" />
+            ) : (
+              <Moon className="w-5 h-5 text-zinc-900" />
+            )}
+          </button>
+        </div>
 
         {/* Ambient premium background glow */}
         <div className="absolute top-[10%] left-[20%] w-[600px] h-[600px] rounded-full bg-indigo-500/[0.04] blur-[150px] pointer-events-none" />
