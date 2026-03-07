@@ -130,41 +130,6 @@ async function searchDuckDuckGoHTML(query: string): Promise<SearchResult[]> {
     }
 }
 
-// ─── Serper.dev Google Search (optional — if API key is set) ───
-async function searchSerper(query: string): Promise<SearchResult[]> {
-    const apiKey = process.env.SERPER_API_KEY;
-    if (!apiKey) return [];
-
-    try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 8000);
-        const res = await fetch("https://google.serper.dev/search", {
-            method: "POST",
-            headers: {
-                "X-API-KEY": apiKey,
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ q: query, num: 10 }),
-            signal: controller.signal,
-        });
-        clearTimeout(timeout);
-
-        if (!res.ok) return [];
-
-        const data = await res.json();
-        const organic = data.organic;
-        if (!Array.isArray(organic) || organic.length === 0) return [];
-
-        return organic.slice(0, 10).map((r: { title?: string; link?: string; snippet?: string; favicon?: string }) => ({
-            title: r.title || "Untitled",
-            url: r.link || "",
-            favicon: r.favicon || "",
-            snippet: r.snippet || "",
-        }));
-    } catch {
-        return [];
-    }
-}
 
 // ─── SearXNG-powered search (uses public instances) ───
 const SEARXNG_INSTANCES = (process.env.SEARXNG_INSTANCES || "").split(",").filter(Boolean);
@@ -211,9 +176,13 @@ async function searchSearXNG(query: string): Promise<SearchResult[]> {
     return [];
 }
 
-// ─── Combined search: race DDG endpoints in parallel, then fallback ───
+// ─── Combined search: SearXNG primary, DDG fallback ───
 async function webSearch(query: string): Promise<SearchResult[]> {
-    // Race DDG Lite and DDG HTML in parallel — first one with results wins
+    // 1. Primary: SearXNG (Your private AWS instance)
+    const searxResults = await searchSearXNG(query);
+    if (searxResults.length > 0) return searxResults;
+
+    // 2. Fallback: Race DDG endpoints
     const ddgResults = await Promise.all([
         searchDuckDuckGoLite(query),
         searchDuckDuckGoHTML(query),
@@ -223,13 +192,7 @@ async function webSearch(query: string): Promise<SearchResult[]> {
         if (results.length > 0) return results;
     }
 
-    // Fallback: Serper.dev (if API key is set)
-    const serperResults = await searchSerper(query);
-    if (serperResults.length > 0) return serperResults;
-
-    // Fallback: SearXNG public instances
-    const searxResults = await searchSearXNG(query);
-    return searxResults;
+    return [];
 }
 
 function getHostname(url: string): string {
