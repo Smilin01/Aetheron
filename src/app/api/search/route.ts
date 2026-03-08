@@ -2,6 +2,7 @@ import { streamText, generateText } from "ai";
 import { createGroq } from "@ai-sdk/groq";
 
 export const maxDuration = 120;
+export const runtime = 'edge';
 
 // ─────────────────────────────────────────────────────────────
 // Setup Groq provider with Cascading Model Fallback Chain
@@ -120,7 +121,7 @@ async function querySearXNGInstance(
 ): Promise<SearchResult[]> {
     const isServerless = !!(process.env.NETLIFY || process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
     const controller = new AbortController();
-    const timeoutVal = isServerless ? 4000 : 12000;
+    const timeoutVal = isServerless ? 8000 : 12000;
     const timeout = setTimeout(() => controller.abort(), timeoutVal);
 
     try {
@@ -137,13 +138,26 @@ async function querySearXNGInstance(
 
         const baseUrl = instance.trim().endsWith('/') ? instance.trim().slice(0, -1) : instance.trim();
         const url = `${baseUrl}/search?${params.toString()}`;
-        const res = await fetch(url, {
-            signal: controller.signal,
-            headers: {
-                "Accept": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            },
-        });
+
+        let res;
+        try {
+            res = await fetch(url, {
+                signal: controller.signal,
+                headers: {
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                },
+            });
+        } catch (e: unknown) {
+            clearTimeout(timeout);
+            const isAbort = e instanceof Error && e.name === 'AbortError';
+            if (isAbort) {
+                console.warn(`[SearXNG] Timeout fetching from ${instance}`);
+                return []; // Just return empty on timeout
+            }
+            throw e;
+        }
+
         clearTimeout(timeout);
 
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -281,8 +295,9 @@ async function searchSearXNG(query: string, queryInfo: QueryClassification, isFo
 
     // On serverless, we cap the number of strategies to keep it fast
     let finalStrategies = searchPromises;
-    if (isServerless && searchPromises.length > 2) {
-        finalStrategies = searchPromises.slice(0, 2);
+    if (isServerless && searchPromises.length > 4) {
+        // Increase cap because Edge gets more time
+        finalStrategies = searchPromises.slice(0, 4);
     }
 
     const allResults: SearchResult[][] = [];
@@ -917,12 +932,11 @@ export async function POST(req: Request) {
                 // TIME BUDGET SYSTEM — Prevents serverless timeout
                 // ═══════════════════════════════════════════════════
                 const startTime = Date.now();
-                // Detect if running in serverless (Netlify/Vercel) or localhost
-                // Total budget: Netlify Free is 10s. Netlify Pro is 26s. Vercel is 10s-60s.
-                // We'll be conservative and assume 10s for ALL serverless unless told otherwise.
-                const TOTAL_BUDGET_MS = isServerless ? 10000 : 100000;
+                // We use Edge runtime so the 10s limit no longer applies on Netlify/Vercel.
+                // We can safely allow up to 45 seconds (45000ms) for execution.
+                const TOTAL_BUDGET_MS = 45000;
                 // Reserve time for answer generation (answer stream needs at least 6s to feel responsive)
-                const ANSWER_RESERVE_MS = isServerless ? 6000 : 15000;
+                const ANSWER_RESERVE_MS = 6000;
 
                 const getElapsed = () => Date.now() - startTime;
                 const getRemainingBudget = () => TOTAL_BUDGET_MS - getElapsed();
@@ -1094,9 +1108,9 @@ Respond with ONLY: {"gap_analysis": "brief description of what's missing", "foll
                             }
                         }
 
-                        if (isServerless && roundQueries.length > 2) {
-                            console.log(`[Search] Capping ${roundQueries.length} queries to 2 for serverless budget`);
-                            roundQueries = roundQueries.slice(0, 2);
+                        if (isServerless && roundQueries.length > 4) {
+                            console.log(`[Search] Capping ${roundQueries.length} queries to 4 for serverless budget`);
+                            roundQueries = roundQueries.slice(0, 4);
                         }
 
                         console.log(`[Aetheron ${modeConfig.label} Round ${round}] Queries:`, roundQueries);
