@@ -37,3 +37,12 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# aws and temp files
+aws_settings.yml
+aws_searxng_config.json
+test_api.js
+test_search.js
+build_build.log
+lint_output.txt
+tsc_errors.txt
