@@ -118,8 +118,10 @@ async function querySearXNGInstance(
         pageno?: number;
     } = {}
 ): Promise<SearchResult[]> {
+    const isServerless = !!(process.env.NETLIFY || process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 12000);
+    const timeoutVal = isServerless ? 4000 : 12000;
+    const timeout = setTimeout(() => controller.abort(), timeoutVal);
 
     try {
         const params = new URLSearchParams({
@@ -179,14 +181,20 @@ async function querySearXNG(
         pageno?: number;
     } = {}
 ): Promise<SearchResult[]> {
+    const isServerless = !!(process.env.NETLIFY || process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+
     // 1. Try private instances first (your AWS instance)
+    // On production/serverless, we don't wait sequentially for multiple private instances if we have many.
     for (const instance of PRIVATE_INSTANCES) {
         try {
             const results = await querySearXNGInstance(instance, query, options);
             if (results && results.length > 0) return results;
             console.log(`[SearXNG] Private instance returned zero results: ${instance}`);
-        } catch (e) {
-            console.warn(`[SearXNG] Private instance failed: ${instance}`, e);
+        } catch (e: unknown) {
+            console.warn(`[SearXNG] Private instance failed: ${instance} - ${e instanceof Error ? e.message : String(e)}`);
+            // On production, if the private instance is failing (which we know it is right now),
+            // we should probably fall through immediately to public ones.
+            if (isServerless) break;
         }
     }
 
@@ -269,13 +277,28 @@ async function searchSearXNG(query: string, queryInfo: QueryClassification, isFo
         );
     }
 
+    const isServerless = !!(process.env.NETLIFY || process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+
+    // On serverless, we cap the number of strategies to keep it fast
+    let finalStrategies = searchPromises;
+    if (isServerless && searchPromises.length > 2) {
+        finalStrategies = searchPromises.slice(0, 2);
+    }
+
     const allResults: SearchResult[][] = [];
-    for (const fetcher of searchPromises) {
-        try {
-            const res = await fetcher();
-            allResults.push(res);
-        } catch {
-            allResults.push([]);
+    if (isServerless) {
+        // Parallel on serverless for speed (since we cap strategies)
+        const resArrays = await Promise.all(finalStrategies.map(s => s().catch(() => [] as SearchResult[])));
+        allResults.push(...resArrays);
+    } else {
+        // Sequential on localhost for safety
+        for (const fetcher of finalStrategies) {
+            try {
+                const res = await fetcher();
+                allResults.push(res);
+            } catch {
+                allResults.push([]);
+            }
         }
     }
 
@@ -894,11 +917,11 @@ export async function POST(req: Request) {
                 // ═══════════════════════════════════════════════════
                 const startTime = Date.now();
                 // Detect if running in serverless (Netlify/Vercel) or localhost
-                const isServerless = !!(process.env.NETLIFY || process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
-                // Reserve time for answer generation (answer stream needs at least 15s)
-                const ANSWER_RESERVE_MS = 15000;
-                // Total budget: serverless ~25s (Netlify Pro) or ~100s for localhost
-                const TOTAL_BUDGET_MS = isServerless ? 25000 : 100000;
+                // Total budget: Netlify Free is 10s. Netlify Pro is 26s. Vercel is 10s-60s.
+                // We'll be conservative and assume 10s for ALL serverless unless told otherwise.
+                const TOTAL_BUDGET_MS = isServerless ? 10000 : 100000;
+                // Reserve time for answer generation (answer stream needs at least 6s to feel responsive)
+                const ANSWER_RESERVE_MS = isServerless ? 6000 : 15000;
 
                 const getElapsed = () => Date.now() - startTime;
                 const getRemainingBudget = () => TOTAL_BUDGET_MS - getElapsed();
@@ -1070,18 +1093,31 @@ Respond with ONLY: {"gap_analysis": "brief description of what's missing", "foll
                             }
                         }
 
+                        const isServerless = !!(process.env.NETLIFY || process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+                        if (isServerless && roundQueries.length > 2) {
+                            console.log(`[Search] Capping ${roundQueries.length} queries to 2 for serverless budget`);
+                            roundQueries = roundQueries.slice(0, 2);
+                        }
+
                         console.log(`[Aetheron ${modeConfig.label} Round ${round}] Queries:`, roundQueries);
                         sendEvent("step", { message: `Round ${round}/${modeConfig.rounds}: Searching ${roundQueries.length} queries...` });
 
                         // ── Search all queries in parallel, but batched ──
-                        // Rate limit protection: run searches sequentially or in small batches
-                        // to prevent DDoSing the private SearXNG instance.
+                        // Rate limit protection: run searches in small batches (3 at a time)
+                        // to balance between speed (preventing Netlify timeout) and server load.
                         const searchResultsArrays: SearchResult[][] = [];
 
-                        // Limit to 1 concurrent search (strictly sequential)
-                        for (const q of roundQueries) {
-                            const res = await webSearch(q, queryInfo, q !== coreQuery);
-                            searchResultsArrays.push(res);
+                        const batchSize = isServerless ? 3 : 1;
+                        for (let i = 0; i < roundQueries.length; i += batchSize) {
+                            // Check time budget before starting each batch
+                            if (getRemainingBudget() < ANSWER_RESERVE_MS + 2000) {
+                                console.log("[Search] Skipping remaining search queries due to low budget");
+                                break;
+                            }
+                            const batch = roundQueries.slice(i, i + batchSize);
+                            const batchPromises = batch.map((q: string) => webSearch(q, queryInfo, q !== coreQuery));
+                            const batchResults = await Promise.all(batchPromises);
+                            searchResultsArrays.push(...batchResults);
                         }
 
                         // ── Merge results ─────────────────────────────────
