@@ -890,6 +890,7 @@ function getHostname(url: string): string {
 export async function POST(req: Request) {
     try {
         const { messages, model: requestedModel, mode: searchMode } = await req.json();
+        const isServerless = !!(process.env.NETLIFY || process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
         // Store the model ID string (not the instantiated model) so we can use fallback chains
         const userSelectedModelId = requestedModel || "llama-3.3-70b-versatile";
         const latestMessage = messages[messages.length - 1];
@@ -1093,7 +1094,6 @@ Respond with ONLY: {"gap_analysis": "brief description of what's missing", "foll
                             }
                         }
 
-                        const isServerless = !!(process.env.NETLIFY || process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
                         if (isServerless && roundQueries.length > 2) {
                             console.log(`[Search] Capping ${roundQueries.length} queries to 2 for serverless budget`);
                             roundQueries = roundQueries.slice(0, 2);
