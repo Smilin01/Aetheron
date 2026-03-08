@@ -33,9 +33,6 @@ import {
     ExternalLink,
     Sun,
     Moon,
-    Cpu,
-    Hexagon,
-    Sparkles,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -228,6 +225,7 @@ function SearchContent() {
     const [processSteps, setProcessSteps] = useState<ProcessStep[]>([]);
     const [activeUrls, setActiveUrls] = useState<Map<string, { hostname: string; status: "reading" | "done" | "failed" }>>(new Map());
     const [isProcessOpen, setIsProcessOpen] = useState(true);
+    const [researchRound, setResearchRound] = useState<{ current: number; total: number } | null>(null);
 
     // Sidebar & thread state
     const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -377,6 +375,24 @@ function SearchContent() {
                                         );
                                     } else if (data.type === "error") {
                                         console.error("Server streaming error:", data.message);
+                                    } else if (data.type === "research_start") {
+                                        setResearchRound({ current: 1, total: data.totalRounds });
+                                        setProcessSteps((prev) => [
+                                            ...prev,
+                                            { type: "step", message: data.message, timestamp: Date.now() }
+                                        ]);
+                                    } else if (data.type === "research_round") {
+                                        setResearchRound({ current: data.round, total: data.totalRounds });
+                                        setProcessSteps((prev) => [
+                                            ...prev,
+                                            { type: "step", message: data.message, timestamp: Date.now() }
+                                        ]);
+                                    } else if (data.type === "research_complete") {
+                                        setResearchRound(null);
+                                        setProcessSteps((prev) => [
+                                            ...prev,
+                                            { type: "step", message: `Research complete: ${data.totalSources} sources, ${data.totalChunks} segments analyzed across ${data.rounds} rounds`, timestamp: Date.now() }
+                                        ]);
                                     }
                                 } catch {
                                     /* skip non-JSON lines */
@@ -418,7 +434,7 @@ function SearchContent() {
             setMessages([userMsg]);
             streamSearch([userMsg], selectedModel, selectedMode);
         }
-    }, [q, streamSearch, selectedModel]);
+    }, [q, streamSearch, selectedModel, selectedMode]);
 
     // Auto-scroll to bottom of the page when new messages arrive
     useEffect(() => {
@@ -526,6 +542,69 @@ function SearchContent() {
                                 target="_blank"
                                 rel="noopener noreferrer"
                             />
+                        );
+                    },
+                    // ── Enhanced Table Rendering ──────────────
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    table: ({ children }: any) => (
+                        <div className="my-4 overflow-x-auto rounded-xl border border-border/50 shadow-sm">
+                            <table className="w-full text-sm border-collapse">{children}</table>
+                        </div>
+                    ),
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    thead: ({ children }: any) => (
+                        <thead className="bg-muted/50 border-b border-border/50">{children}</thead>
+                    ),
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    tbody: ({ children }: any) => (
+                        <tbody className="divide-y divide-border/30">{children}</tbody>
+                    ),
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    tr: ({ children }: any) => (
+                        <tr className="hover:bg-muted/30 transition-colors">{children}</tr>
+                    ),
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    th: ({ children }: any) => (
+                        <th className="px-4 py-2.5 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">{children}</th>
+                    ),
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    td: ({ children }: any) => (
+                        <td className="px-4 py-2.5 text-sm text-foreground/90">{children}</td>
+                    ),
+                    // ── Enhanced Headings ────────────────────
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    h1: ({ children }: any) => (
+                        <h1 className="text-2xl font-bold text-foreground mt-8 mb-4 pb-2 border-b border-border/40">{children}</h1>
+                    ),
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    h2: ({ children }: any) => (
+                        <h2 className="text-xl font-semibold text-foreground mt-7 mb-3 pl-3 border-l-2 border-indigo-500/50">{children}</h2>
+                    ),
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    h3: ({ children }: any) => (
+                        <h3 className="text-lg font-medium text-foreground mt-5 mb-2 pl-3 border-l-2 border-indigo-500/25">{children}</h3>
+                    ),
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    h4: ({ children }: any) => (
+                        <h4 className="text-base font-medium text-foreground/90 mt-4 mb-1.5">{children}</h4>
+                    ),
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    hr: () => (
+                        <hr className="my-6 border-border/40" />
+                    ),
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    blockquote: ({ children }: any) => (
+                        <blockquote className="my-4 pl-4 border-l-2 border-indigo-500/40 text-muted-foreground italic">{children}</blockquote>
+                    ),
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    code: ({ inline, children, className }: any) => {
+                        if (inline) {
+                            return <code className="px-1.5 py-0.5 rounded-md bg-muted/80 text-foreground/90 text-[13px] font-mono">{children}</code>;
+                        }
+                        return (
+                            <pre className="my-4 rounded-xl bg-muted/50 border border-border/40 p-4 overflow-x-auto">
+                                <code className={`text-sm font-mono text-foreground/90 ${className || ''}`}>{children}</code>
+                            </pre>
                         );
                     },
                 }}
@@ -794,14 +873,31 @@ function SearchContent() {
                                                         <CheckCircle2 className="w-4 h-4 text-emerald-400" />
                                                     )}
                                                 </div>
-                                                <div className="flex flex-col items-start">
-                                                    <span className="text-sm font-semibold text-foreground">
-                                                        {isSearching ? "Researching..." : "Research complete"}
-                                                    </span>
+                                                <div className="flex flex-col items-start flex-1">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-sm font-semibold text-foreground">
+                                                            {isSearching ? (researchRound ? `${selectedMode === 'deep_research' ? 'Deep Research' : 'Research'}: Round ${researchRound.current}/${researchRound.total}` : "Searching...") : "Research complete"}
+                                                        </span>
+                                                        {researchRound && isSearching && (
+                                                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-500/15 text-indigo-400 font-semibold">
+                                                                {selectedMode === 'deep_research' ? '🔬 DEEP' : '🔍 RESEARCH'}
+                                                            </span>
+                                                        )}
+                                                    </div>
                                                     {isSearching && processSteps.length > 0 && (
                                                         <span className="text-[11px] text-muted-foreground">
                                                             {processSteps[processSteps.length - 1].message}
                                                         </span>
+                                                    )}
+                                                    {researchRound && isSearching && (
+                                                        <div className="w-full mt-1.5 h-1 rounded-full bg-border/40 overflow-hidden">
+                                                            <motion.div
+                                                                className="h-full rounded-full bg-indigo-500/60"
+                                                                initial={{ width: '0%' }}
+                                                                animate={{ width: `${(researchRound.current / researchRound.total) * 100}%` }}
+                                                                transition={{ duration: 0.5 }}
+                                                            />
+                                                        </div>
                                                     )}
                                                 </div>
                                             </div>

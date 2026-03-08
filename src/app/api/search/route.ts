@@ -1,7 +1,7 @@
 import { streamText, generateText } from "ai";
 import { createGroq } from "@ai-sdk/groq";
 
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 // ─────────────────────────────────────────────────────────────
 // Setup Groq provider
@@ -780,6 +780,7 @@ function rankResults(
     scored.sort((a, b) => b._totalScore - a._totalScore);
 
     // Return without internal score field
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     return scored.map(({ _totalScore, ...rest }) => rest);
 }
 
@@ -809,12 +810,14 @@ export async function POST(req: Request) {
         const query = latestMessage.content;
 
         const modeMap = {
-            search: { maxQueries: 5, maxSources: 10, maxUrlsToRead: 6, maxChunks: 15, maxContext: 14000, label: "Search" },
-            research: { maxQueries: 7, maxSources: 15, maxUrlsToRead: 8, maxChunks: 20, maxContext: 20000, label: "Research" },
-            deep_research: { maxQueries: 10, maxSources: 20, maxUrlsToRead: 10, maxChunks: 30, maxContext: 28000, label: "Deep Research" },
+            search: { maxQueries: 5, maxSources: 10, maxUrlsToRead: 6, maxChunks: 15, maxContext: 14000, label: "Search", rounds: 1 },
+            research: { maxQueries: 8, maxSources: 18, maxUrlsToRead: 10, maxChunks: 25, maxContext: 22000, label: "Research", rounds: 2 },
+            deep_research: { maxQueries: 12, maxSources: 25, maxUrlsToRead: 14, maxChunks: 40, maxContext: 30000, label: "Deep Research", rounds: 3 },
         };
         const safeMode: keyof typeof modeMap = Object.keys(modeMap).includes(searchMode) ? searchMode : "search";
         const modeConfig = modeMap[safeMode];
+        const isResearch = safeMode === "research" || safeMode === "deep_research";
+        const isDeepResearch = safeMode === "deep_research";
 
         const encoder = new TextEncoder();
         const stream = new ReadableStream({
@@ -824,6 +827,19 @@ export async function POST(req: Request) {
                 };
 
                 try {
+                    // ═══════════════════════════════════════════════════
+                    // RESEARCH PHASE INDICATOR
+                    // ═══════════════════════════════════════════════════
+                    if (isResearch) {
+                        sendEvent("research_start", {
+                            mode: safeMode,
+                            totalRounds: modeConfig.rounds,
+                            message: isDeepResearch
+                                ? "Deep Research: Initiating comprehensive multi-round investigation..."
+                                : "Research: Starting in-depth analysis...",
+                        });
+                    }
+
                     sendEvent("step", { message: `${modeConfig.label}: Understanding your question...` });
 
                     // ── Step 1: Classify Query ────────────────────────
@@ -838,6 +854,8 @@ export async function POST(req: Request) {
                             `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.substring(0, 300)}`
                         ).join('\n');
 
+                        const queryCount = isDeepResearch ? 10 : isResearch ? 8 : 5;
+
                         let rewriteSystemPrompt = `You are an expert search query optimizer. You understand how search engines work and generate queries that maximize result quality. Output ONLY valid JSON. Never output markdown, explanation, or conversational text.
 
 RULES:
@@ -846,6 +864,14 @@ RULES:
 - Include relevant context terms (profession, location, technology, etc.)
 - Each query should find DIFFERENT types of results
 - For ambiguous queries, include disambiguation terms`;
+
+                        if (isResearch) {
+                            rewriteSystemPrompt += `\n\nRESEARCH MODE RULES:
+- Generate ${queryCount} queries covering EVERY possible angle
+- Include queries for: definitions, comparisons, statistics, expert opinions, case studies, pros/cons, history/timeline, technical details, alternatives
+- Ensure queries target academic sources, industry reports, and expert blogs
+- Include queries that would surface numerical data and statistics`;
+                        }
 
                         if (queryInfo.isPerson) {
                             rewriteSystemPrompt += `\n\nPERSON SEARCH RULES:
@@ -870,9 +896,9 @@ RULES:
                         let rewritePrompt = "";
 
                         if (historyContext.length > 0) {
-                            rewritePrompt = `Conversation History:\n${historyContext}\n\nLatest User Query: "${query}"\n\nBased on the conversation history, determine what the user is ACTUALLY asking about. Resolve ALL pronouns with their specific referents.\n\nGenerate 5 diverse, highly specific search queries. Each query MUST target a completely different source or angle.\n\nRespond with ONLY: {"core_query": "The fully resolved question", "search_queries": ["q1", "q2", "q3", "q4", "q5"]}`;
+                            rewritePrompt = `Conversation History:\n${historyContext}\n\nLatest User Query: "${query}"\n\nBased on the conversation history, determine what the user is ACTUALLY asking about. Resolve ALL pronouns with their specific referents.\n\nGenerate ${queryCount} diverse, highly specific search queries. Each query MUST target a completely different source or angle.\n\nRespond with ONLY: {"core_query": "The fully resolved question", "search_queries": [${Array(queryCount).fill('"q"').join(', ')}]}`;
                         } else {
-                            rewritePrompt = `User Query: "${query}"\n\nGenerate 5 diverse search queries that together will comprehensively answer this query from multiple angles and sources.\n\nRespond with ONLY: {"core_query": "${query}", "search_queries": ["q1", "q2", "q3", "q4", "q5"]}`;
+                            rewritePrompt = `User Query: "${query}"\n\nGenerate ${queryCount} diverse search queries that together will comprehensively answer this query from multiple angles and sources.\n\nRespond with ONLY: {"core_query": "${query}", "search_queries": [${Array(queryCount).fill('"q"').join(', ')}]}`;
                         }
 
                         const { text: rewriteResult } = await generateText({
@@ -895,143 +921,197 @@ RULES:
                         console.warn("Query rewriting failed, using original query:", e);
                     }
 
-                    // ── Step 3: Multi-Query Parallel Search ───────────
-                    const queriesToSearch = Array.from(new Set([coreQuery, ...rewrittenQueries])).slice(0, modeConfig.maxQueries + 1);
-                    console.log(`[Aetheron ${modeConfig.label}] Queries:`, queriesToSearch);
+                    // ══════════════════════════════════════════════════════
+                    // MULTI-ROUND RESEARCH LOOP
+                    // ══════════════════════════════════════════════════════
+                    let allTopSources: SearchResult[] = [];
+                    const allContextChunks: { url: string; text: string; score: number; method: string }[] = [];
+                    const allReadContent: { url: string; text: string; method: string }[] = [];
 
-                    sendEvent("step", { message: `Searching across multiple sources...` });
+                    for (let round = 1; round <= modeConfig.rounds; round++) {
+                        if (isResearch && round > 1) {
+                            sendEvent("research_round", {
+                                round,
+                                totalRounds: modeConfig.rounds,
+                                message: round === 2
+                                    ? "Round 2: Performing targeted deep-dive searches based on initial findings..."
+                                    : "Round 3: Cross-referencing and verifying claims across sources...",
+                            });
+                        }
 
-                    // Search all queries in parallel
-                    const searchPromises = queriesToSearch.map((q: string) =>
-                        webSearch(q, queryInfo)
-                    );
-                    const searchResultsArrays = await Promise.all(searchPromises);
+                        // ── Determine queries for this round ─────────────
+                        let roundQueries: string[];
 
-                    // ── Step 4: Merge, Score & Rank All Results ────────
-                    // Merge with cross-query hit tracking
-                    const urlScoreMap = new Map<string, SearchResult & { crossQueryHits: number }>();
+                        if (round === 1) {
+                            roundQueries = Array.from(new Set([coreQuery, ...rewrittenQueries])).slice(0, Math.ceil(modeConfig.maxQueries / modeConfig.rounds) + 2);
+                        } else {
+                            // For subsequent rounds: generate follow-up queries based on what we've learned
+                            try {
+                                const knownSnippets = allTopSources.slice(0, 8).map(s => s.snippet).filter(Boolean).join("\n");
+                                const { text: followUpResult } = await generateText({
+                                    model: rewriteModel,
+                                    system: `You are a research analyst performing multi-round investigative research. Based on initial findings, identify GAPS in the research and generate follow-up queries to fill those gaps. Output ONLY valid JSON.`,
+                                    prompt: `Original question: "${query}"
 
-                    for (const results of searchResultsArrays) {
-                        for (const r of results) {
-                            if (!r.url) continue;
-                            const existing = urlScoreMap.get(r.url);
-                            if (existing) {
-                                existing.crossQueryHits += 1;
-                                existing.score = (existing.score || 0) + (r.score || 0);
-                                if (r.snippet && r.snippet.length > (existing.snippet?.length || 0)) {
-                                    existing.snippet = r.snippet;
+Initial findings summary:
+${knownSnippets.substring(0, 3000)}
+
+What key information is STILL MISSING? Generate ${round === 2 ? 4 : 3} follow-up search queries to fill gaps, find contradicting viewpoints, get statistics/numbers, or verify claims.
+
+Respond with ONLY: {"gap_analysis": "brief description of what's missing", "follow_up_queries": ["q1", "q2", "q3"${round === 2 ? ', "q4"' : ''}]}`,
+                                });
+
+                                const fMatch = followUpResult.match(/\{[\s\S]*\}/);
+                                if (fMatch) {
+                                    const parsed = JSON.parse(fMatch[0]);
+                                    roundQueries = parsed.follow_up_queries || [];
+                                    if (parsed.gap_analysis) {
+                                        sendEvent("step", { message: `Gap analysis: ${parsed.gap_analysis}` });
+                                    }
+                                } else {
+                                    roundQueries = [`${query} statistics data`, `${query} comparison analysis`];
                                 }
-                                // Merge engine lists
-                                if (r.engines) {
-                                    const existingEngines = new Set(existing.engines || []);
-                                    for (const e of r.engines) existingEngines.add(e);
-                                    existing.engines = Array.from(existingEngines);
-                                }
-                            } else {
-                                urlScoreMap.set(r.url, { ...r, crossQueryHits: 1 });
+                            } catch {
+                                roundQueries = [`${query} detailed analysis`, `${query} expert opinion review`];
                             }
                         }
-                    }
 
-                    const mergedResults = Array.from(urlScoreMap.values());
+                        console.log(`[Aetheron ${modeConfig.label} Round ${round}] Queries:`, roundQueries);
+                        sendEvent("step", { message: `Round ${round}/${modeConfig.rounds}: Searching ${roundQueries.length} queries...` });
 
-                    // Apply BM25 + authority ranking
-                    const rankedResults = rankResults(mergedResults, query, queryInfo);
+                        // ── Search all queries in parallel ───────────────
+                        const searchPromises = roundQueries.map((q: string) => webSearch(q, queryInfo));
+                        const searchResultsArrays = await Promise.all(searchPromises);
 
-                    // Enforce domain diversity and take top results
-                    const topSources = enforceDomainDiversity(rankedResults, 2).slice(0, modeConfig.maxSources);
-                    const topUrls = topSources.map((s) => s.url);
-
-                    console.log("[Aetheron Sources]", topSources.map((s) => `${getHostname(s.url)}: ${s.title} (engines: ${s.engines?.join(",") || "?"})`));
-
-                    // Send sources early for fast UI
-                    sendEvent("sources", { sources: topSources });
-
-                    if (topUrls.length > 0) {
-                        sendEvent("step", { message: `Found ${topUrls.length} sources. Reading content...` });
-                    }
-
-                    // ── Step 5: Content Extraction ────────────────────
-                    const urlsToRead = topUrls.slice(0, modeConfig.maxUrlsToRead);
-                    const extractionPromises = urlsToRead.map(async (url: string) => {
-                        const hostname = getHostname(url);
-                        const fallbackSnippet = topSources.find((s) => s.url === url)?.snippet || "";
-                        sendEvent("reading_url", { url, hostname });
-
-                        try {
-                            const result = await extractPageContent(url, fallbackSnippet, 6000);
-                            sendEvent("read_complete", { url, hostname, success: true });
-                            return result;
-                        } catch {
-                            sendEvent("read_complete", { url, hostname, success: true });
-                            return { url, text: fallbackSnippet, method: "snippet" };
+                        // ── Merge results ─────────────────────────────────
+                        const urlScoreMap = new Map<string, SearchResult & { crossQueryHits: number }>();
+                        // Include existing sources
+                        for (const s of allTopSources) {
+                            urlScoreMap.set(s.url, { ...s, crossQueryHits: 1 });
                         }
-                    });
 
-                    const pagesContent = await Promise.all(extractionPromises);
+                        for (const results of searchResultsArrays) {
+                            for (const r of results) {
+                                if (!r.url) continue;
+                                const existing = urlScoreMap.get(r.url);
+                                if (existing) {
+                                    existing.crossQueryHits += 1;
+                                    existing.score = (existing.score || 0) + (r.score || 0);
+                                    if (r.snippet && r.snippet.length > (existing.snippet?.length || 0)) {
+                                        existing.snippet = r.snippet;
+                                    }
+                                    if (r.engines) {
+                                        const existingEngines = new Set(existing.engines || []);
+                                        for (const e of r.engines) existingEngines.add(e);
+                                        existing.engines = Array.from(existingEngines);
+                                    }
+                                } else {
+                                    urlScoreMap.set(r.url, { ...r, crossQueryHits: 1 });
+                                }
+                            }
+                        }
 
-                    // ── Step 6: Smart Chunking & BM25 Scoring ─────────
-                    const queryKeywords = extractKeywords(query + " " + coreQuery);
-                    const allChunks: { url: string; text: string; score: number; method: string }[] = [];
+                        const mergedResults = Array.from(urlScoreMap.values());
+                        const rankedResults = rankResults(mergedResults, query, queryInfo);
+                        allTopSources = enforceDomainDiversity(rankedResults, 2).slice(0, modeConfig.maxSources);
 
-                    for (const { url, text, method } of pagesContent) {
-                        if (!text || text.length < 50) continue;
-                        const chunks = smartChunk(text, 2000);
-                        for (const chunk of chunks) {
-                            const relevance = scoreChunk(chunk, queryKeywords);
-                            // Boost chunks from full content extraction
-                            const methodBoost = method === "jina" ? 2 : method === "direct" ? 1 : 0;
-                            allChunks.push({
-                                url,
-                                text: chunk,
-                                score: relevance + methodBoost,
-                                method,
+                        // Send updated sources
+                        sendEvent("sources", { sources: allTopSources });
+                        console.log(`[Aetheron Round ${round}] Total sources: ${allTopSources.length}`);
+
+                        // ── Content Extraction for new URLs ──────────────
+                        const alreadyReadUrls = new Set(allReadContent.map(c => c.url));
+                        const newUrlsToRead = allTopSources
+                            .filter(s => !alreadyReadUrls.has(s.url))
+                            .slice(0, Math.ceil(modeConfig.maxUrlsToRead / modeConfig.rounds) + (round === 1 ? 2 : 0))
+                            .map(s => s.url);
+
+                        if (newUrlsToRead.length > 0) {
+                            sendEvent("step", { message: `Reading ${newUrlsToRead.length} new sources...` });
+
+                            const extractionPromises = newUrlsToRead.map(async (url: string) => {
+                                const hostname = getHostname(url);
+                                const fallbackSnippet = allTopSources.find((s) => s.url === url)?.snippet || "";
+                                sendEvent("reading_url", { url, hostname });
+
+                                try {
+                                    const result = await extractPageContent(url, fallbackSnippet, isDeepResearch ? 8000 : 6000);
+                                    sendEvent("read_complete", { url, hostname, success: true });
+                                    return result;
+                                } catch {
+                                    sendEvent("read_complete", { url, hostname, success: true });
+                                    return { url, text: fallbackSnippet, method: "snippet" };
+                                }
                             });
-                        }
-                    }
 
-                    // Add snippets from sources we didn't fully read
-                    for (const source of topSources) {
-                        if (source.snippet && source.snippet.length > 30 && !urlsToRead.includes(source.url)) {
-                            allChunks.push({
-                                url: source.url,
-                                text: source.snippet,
-                                score: scoreChunk(source.snippet, queryKeywords) - 1,
-                                method: "snippet",
-                            });
+                            const pagesContent = await Promise.all(extractionPromises);
+                            allReadContent.push(...pagesContent);
                         }
-                    }
 
-                    // Take top chunks, ensuring source diversity
+                        // ── Chunk and score ──────────────────────────────
+                        const queryKeywords = extractKeywords(query + " " + coreQuery);
+
+                        for (const { url, text, method } of allReadContent) {
+                            if (!text || text.length < 50) continue;
+                            const chunks = smartChunk(text, isDeepResearch ? 2500 : 2000);
+                            for (const chunk of chunks) {
+                                const relevance = scoreChunk(chunk, queryKeywords);
+                                const methodBoost = method === "jina" ? 2 : method === "direct" ? 1 : 0;
+                                // Avoid duplicate chunks
+                                if (!allContextChunks.some(c => c.url === url && c.text === chunk)) {
+                                    allContextChunks.push({ url, text: chunk, score: relevance + methodBoost, method });
+                                }
+                            }
+                        }
+
+                        // Add snippets from unread sources
+                        for (const source of allTopSources) {
+                            if (source.snippet && source.snippet.length > 30 && !alreadyReadUrls.has(source.url) && !newUrlsToRead.includes(source.url)) {
+                                if (!allContextChunks.some(c => c.url === source.url)) {
+                                    allContextChunks.push({
+                                        url: source.url,
+                                        text: source.snippet,
+                                        score: scoreChunk(source.snippet, queryKeywords) - 1,
+                                        method: "snippet",
+                                    });
+                                }
+                            }
+                        }
+                    } // END multi-round loop
+
+                    // ══════════════════════════════════════════════════════
+                    // SELECT BEST CHUNKS & BUILD CONTEXT
+                    // ══════════════════════════════════════════════════════
                     const chunksByUrl = new Map<string, number>();
-                    const topChunks: typeof allChunks = [];
-                    const sortedChunks = allChunks.sort((a, b) => b.score - a.score);
+                    const topChunks: typeof allContextChunks = [];
+                    const sortedChunks = allContextChunks.sort((a, b) => b.score - a.score);
+                    const maxChunksPerUrl = isDeepResearch ? 5 : isResearch ? 4 : 3;
 
                     for (const chunk of sortedChunks) {
                         if (topChunks.length >= modeConfig.maxChunks) break;
                         const urlCount = chunksByUrl.get(chunk.url) || 0;
-                        if (urlCount >= 3) continue; // Max 3 chunks per URL
+                        if (urlCount >= maxChunksPerUrl) continue;
                         topChunks.push(chunk);
                         chunksByUrl.set(chunk.url, urlCount + 1);
                     }
 
-                    // ── Step 7: Build RAG Context ──────────────────────
+                    // Build context
                     let contextText = "";
                     let totalContextLength = 0;
                     const maxContextLength = modeConfig.maxContext;
 
                     for (const chunk of topChunks) {
                         if (totalContextLength > maxContextLength) break;
-                        const sourceIndex = topSources.findIndex((s) => s.url === chunk.url);
+                        const sourceIndex = allTopSources.findIndex((s) => s.url === chunk.url);
                         if (sourceIndex === -1) continue;
-                        const chunkText = `[Source ${sourceIndex + 1}: ${topSources[sourceIndex].title} - ${getHostname(chunk.url)}]\n${chunk.text}\n\n`;
+                        const chunkText = `[Source ${sourceIndex + 1}: ${allTopSources[sourceIndex].title} - ${getHostname(chunk.url)}]\n${chunk.text}\n\n`;
                         contextText += chunkText;
                         totalContextLength += chunkText.length;
                     }
 
-                    // Fallback: use snippets if no chunks available
-                    if (topChunks.length === 0 && topSources.length > 0) {
-                        topSources.forEach((s, idx) => {
+                    // Fallback
+                    if (topChunks.length === 0 && allTopSources.length > 0) {
+                        allTopSources.forEach((s, idx) => {
                             if (s.snippet) {
                                 contextText += `[Source ${idx + 1}: ${s.title} - ${getHostname(s.url)}]\n${s.snippet}\n\n`;
                             }
@@ -1039,12 +1119,141 @@ RULES:
                     }
 
                     let sourceListText = "## Available sources & metadata:\n";
-                    topSources.forEach((s, idx) => {
+                    allTopSources.forEach((s, idx) => {
                         sourceListText += `[${idx + 1}] Title: ${s.title}\n    URL: ${s.url}\n    Summary/Snippet: ${s.snippet || "No snippet available"}\n\n`;
                     });
 
-                    // ── Step 8: Generate Answer ───────────────────────
-                    const ragSystemPrompt = `You are Aetheron, an advanced AI research assistant playing the role of a world-class search engine. You provide thorough, well-organized, and authoritative answers based on your provided sources.
+                    // ══════════════════════════════════════════════════════
+                    // GENERATE ANSWER — MODE-SPECIFIC PROMPTS
+                    // ══════════════════════════════════════════════════════
+                    let ragSystemPrompt: string;
+
+                    if (isDeepResearch) {
+                        // ─── DEEP RESEARCH PROMPT ─────────────────────────
+                        sendEvent("step", { message: "Synthesizing comprehensive research report..." });
+
+                        ragSystemPrompt = `You are Aetheron Deep Research, an elite AI research analyst producing comprehensive, publication-quality research reports. You have conducted a multi-round investigation across ${allTopSources.length} sources and ${topChunks.length} content segments.
+
+## YOUR MISSION:
+Produce a COMPREHENSIVE RESEARCH REPORT that rivals professional analyst reports. This must be thorough, data-rich, and structured.
+
+## MANDATORY REPORT STRUCTURE:
+
+### 1. Executive Summary
+- 2-3 paragraph overview of key findings
+- Highlight the most critical insights
+
+### 2. Background & Context
+- Explain the topic thoroughly
+- Provide necessary context for understanding
+
+### 3. Detailed Analysis
+- Break into logical sub-sections using ## headers
+- Each section should have multiple paragraphs
+- Include specific data points, numbers, and statistics
+- Compare different approaches/options where relevant
+
+### 4. Comparison Table(s)
+- When comparing items, technologies, approaches, or options, you MUST include markdown comparison tables
+- Tables MUST have at least 3 columns and 3+ rows
+- Example format:
+| Feature | Option A | Option B | Option C |
+|---------|----------|----------|----------|
+| Speed   | Fast     | Medium   | Slow     |
+
+### 5. Key Statistics & Data Points
+- Present numerical data, percentages, market figures in a dedicated section
+- Use bullet points with **bold** metric names
+- If exact numbers aren't available, provide ranges or estimates based on source context
+
+### 6. Pros & Cons Analysis
+- Present balanced viewpoints
+- Include a table or structured list of advantages and disadvantages
+
+### 7. Timeline / History (if applicable)
+- Key milestones or dates mentioned in sources
+- Present chronologically
+
+### 8. Expert Opinions & Perspectives
+- Quote or summarize expert viewpoints from sources
+- Note any conflicting perspectives
+
+### 9. Conclusion & Recommendations
+- Summarize the most important findings
+- Provide actionable recommendations when applicable
+- Suggest areas for further research
+
+## FORMATTING REQUIREMENTS:
+- Use **bold** for ALL key terms, names, and important concepts
+- Use markdown tables liberally — at minimum ONE comparison table
+- Use bullet point lists for structured data
+- Use ## and ### headers to organize sections
+- Minimum report length: 800+ words
+- Cite EVERY claim using inline [1], [2] format
+- Every source should be cited at least once
+
+## CITATION RULES:
+- Use [1], [2], etc. for inline citations matching source numbers
+- Every factual claim MUST have a citation
+- When data from multiple sources agrees, cite all: [1][3][5]
+
+${sourceListText}
+
+## Deep Research Content (${topChunks.length} analyzed segments from ${modeConfig.rounds} research rounds):
+${contextText.length > 5 ? contextText : "Rely on Available sources & metadata above."}`;
+
+                    } else if (isResearch) {
+                        // ─── RESEARCH PROMPT ──────────────────────────────
+                        sendEvent("step", { message: "Generating detailed research analysis..." });
+
+                        ragSystemPrompt = `You are Aetheron Research, an advanced AI research analyst producing thorough, well-structured analysis reports. You have conducted an in-depth investigation across ${allTopSources.length} sources.
+
+## YOUR MISSION:
+Produce a DETAILED RESEARCH ANALYSIS that goes significantly deeper than a standard search answer. Include structured data, comparisons, and actionable insights.
+
+## REPORT STRUCTURE:
+
+### 1. Overview
+- A concise but thorough overview of the topic (2-3 paragraphs)
+
+### 2. In-Depth Analysis
+- Break into logical sections with ## headers
+- Provide specific details, data points, and examples
+- Compare and contrast different viewpoints or approaches
+
+### 3. Comparison Table (REQUIRED when applicable)
+- When comparing items, include a markdown comparison table
+- Example:
+| Aspect | Option A | Option B |
+|--------|----------|----------|
+| Cost   | $$$      | $$       |
+
+### 4. Key Data Points
+- **Statistic 1**: value [source]
+- **Statistic 2**: value [source]
+
+### 5. Key Takeaways
+- Bullet point list of the most important findings
+- Actionable recommendations if applicable
+
+## FORMATTING:
+- Use **bold** for key terms and concepts
+- Include at least ONE markdown table when the topic involves comparisons
+- Use bullet points for structured data
+- Use ## headers to organize
+- Minimum 400+ words
+- Cite everything with [1], [2] inline citations
+
+${sourceListText}
+
+## Research Content (${topChunks.length} analyzed segments):
+${contextText.length > 5 ? contextText : "Rely on Available sources & metadata above."}`;
+
+                    } else {
+                        // ─── STANDARD SEARCH PROMPT ───────────────────────
+                        sendEvent("step", { message: "Generating comprehensive answer..." });
+
+                        ragSystemPrompt = `You are Aetheron, an advanced AI research assistant playing the role of a world-class search engine. You provide thorough, well-organized, and authoritative answers based on your provided sources.
 
 ## Core Principles:
 1. **Be Confident & Definitive**: Use the provided source content to build the best possible answer. Never say "I don't have enough information" — synthesize from titles, URLs, snippets, and extracted content.
@@ -1070,8 +1279,7 @@ ${sourceListText}
 
 ## Deep Extracted Content (if available):
 ${contextText.length > 5 ? contextText : "No deep extraction available. Rely ENTIRELY on the Available sources & metadata above to answer the query. Be creative in synthesizing the available snippets and metadata into a rich, informative answer."}`;
-
-                    sendEvent("step", { message: "Generating comprehensive answer..." });
+                    }
 
                     const result = await streamText({
                         model: selectedAnswerModel,
@@ -1081,6 +1289,15 @@ ${contextText.length > 5 ? contextText : "No deep extraction available. Rely ENT
 
                     for await (const chunk of result.textStream) {
                         sendEvent("text-delta", { delta: chunk });
+                    }
+
+                    if (isResearch) {
+                        sendEvent("research_complete", {
+                            mode: safeMode,
+                            totalSources: allTopSources.length,
+                            totalChunks: topChunks.length,
+                            rounds: modeConfig.rounds,
+                        });
                     }
 
                     sendEvent("done", {});

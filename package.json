@@ -12,6 +12,7 @@
     "@ai-sdk/groq": "^3.0.26",
     "@ai-sdk/openai": "^3.0.37",
     "@ai-sdk/react": "^3.0.107",
+    "@types/mermaid": "^9.1.0",
     "ai": "^6.0.105",
     "clsx": "^2.1.1",
     "framer-motion": "^12.34.3",

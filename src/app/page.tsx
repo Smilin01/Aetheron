@@ -3,7 +3,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Search,
   Sparkles,
   BookOpen,
   Globe,
@@ -19,8 +18,6 @@ import {
   Microscope,
   FlaskConical,
   Check,
-  Cpu,
-  Hexagon,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useTheme } from "@/components/ThemeProvider";
