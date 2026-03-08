@@ -806,6 +806,8 @@ export async function POST(req: Request) {
         const selectedAnswerModel = groq(
             requestedModel || process.env.ANSWER_MODEL || "llama-3.3-70b-versatile"
         );
+        const fallbackModelId = "llama-3.1-8b-instant";
+        const fallbackModel = groq(fallbackModelId);
         const latestMessage = messages[messages.length - 1];
         const query = latestMessage.content;
 
@@ -901,11 +903,23 @@ RULES:
                             rewritePrompt = `User Query: "${query}"\n\nGenerate ${queryCount} diverse search queries that together will comprehensively answer this query from multiple angles and sources.\n\nRespond with ONLY: {"core_query": "${query}", "search_queries": [${Array(queryCount).fill('"q"').join(', ')}]}`;
                         }
 
-                        const { text: rewriteResult } = await generateText({
-                            model: rewriteModel,
-                            system: rewriteSystemPrompt,
-                            prompt: rewritePrompt,
-                        });
+                        let rewriteResult;
+                        try {
+                            const gen = await generateText({
+                                model: rewriteModel,
+                                system: rewriteSystemPrompt,
+                                prompt: rewritePrompt,
+                            });
+                            rewriteResult = gen.text;
+                        } catch (e) {
+                            console.warn("Primary rewrite failed, falling back:", e);
+                            const gen = await generateText({
+                                model: fallbackModel,
+                                system: rewriteSystemPrompt,
+                                prompt: rewritePrompt,
+                            });
+                            rewriteResult = gen.text;
+                        }
 
                         const jsonMatch = rewriteResult.match(/\{[\s\S]*\}/);
                         if (jsonMatch) {
@@ -948,10 +962,12 @@ RULES:
                             // For subsequent rounds: generate follow-up queries based on what we've learned
                             try {
                                 const knownSnippets = allTopSources.slice(0, 8).map(s => s.snippet).filter(Boolean).join("\n");
-                                const { text: followUpResult } = await generateText({
-                                    model: rewriteModel,
-                                    system: `You are a research analyst performing multi-round investigative research. Based on initial findings, identify GAPS in the research and generate follow-up queries to fill those gaps. Output ONLY valid JSON.`,
-                                    prompt: `Original question: "${query}"
+                                let followUpResult;
+                                try {
+                                    const gen = await generateText({
+                                        model: rewriteModel,
+                                        system: `You are a research analyst performing multi-round investigative research. Based on initial findings, identify GAPS in the research and generate follow-up queries to fill those gaps. Output ONLY valid JSON.`,
+                                        prompt: `Original question: "${query}"
 
 Initial findings summary:
 ${knownSnippets.substring(0, 3000)}
@@ -959,7 +975,17 @@ ${knownSnippets.substring(0, 3000)}
 What key information is STILL MISSING? Generate ${round === 2 ? 4 : 3} follow-up search queries to fill gaps, find contradicting viewpoints, get statistics/numbers, or verify claims.
 
 Respond with ONLY: {"gap_analysis": "brief description of what's missing", "follow_up_queries": ["q1", "q2", "q3"${round === 2 ? ', "q4"' : ''}]}`,
-                                });
+                                    });
+                                    followUpResult = gen.text;
+                                } catch (e) {
+                                    console.warn("Follow-up generation failed, falling back:", e);
+                                    const gen = await generateText({
+                                        model: fallbackModel,
+                                        system: `You are a research analyst... Output ONLY valid JSON.`,
+                                        prompt: `Original question: "${query}" ... Generate ${round === 2 ? 4 : 3} follow-up search queries...`,
+                                    });
+                                    followUpResult = gen.text;
+                                }
 
                                 const fMatch = followUpResult.match(/\{[\s\S]*\}/);
                                 if (fMatch) {
@@ -1281,11 +1307,22 @@ ${sourceListText}
 ${contextText.length > 5 ? contextText : "No deep extraction available. Rely ENTIRELY on the Available sources & metadata above to answer the query. Be creative in synthesizing the available snippets and metadata into a rich, informative answer."}`;
                     }
 
-                    const result = await streamText({
-                        model: selectedAnswerModel,
-                        system: ragSystemPrompt,
-                        messages: messages,
-                    });
+                    let result;
+                    try {
+                        result = await streamText({
+                            model: selectedAnswerModel,
+                            system: ragSystemPrompt,
+                            messages: messages,
+                        });
+                    } catch (primaryError: any) {
+                        console.error("Primary model failed, falling back:", primaryError);
+                        // If primary model fails (429 or 404), use the high-limit fallback
+                        result = await streamText({
+                            model: fallbackModel,
+                            system: ragSystemPrompt,
+                            messages: messages,
+                        });
+                    }
 
                     for await (const chunk of result.textStream) {
                         sendEvent("text-delta", { delta: chunk });
