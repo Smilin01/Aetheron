@@ -801,12 +801,20 @@ function getHostname(url: string): string {
 
 export async function POST(req: Request) {
     try {
-        const { messages, model: requestedModel } = await req.json();
+        const { messages, model: requestedModel, mode: searchMode } = await req.json();
         const selectedAnswerModel = groq(
             requestedModel || process.env.ANSWER_MODEL || "meta-llama/llama-4-scout-17b-16e-instruct"
         );
         const latestMessage = messages[messages.length - 1];
         const query = latestMessage.content;
+
+        const modeMap = {
+            search: { maxQueries: 5, maxSources: 10, maxUrlsToRead: 6, maxChunks: 15, maxContext: 14000, label: "Search" },
+            research: { maxQueries: 7, maxSources: 15, maxUrlsToRead: 8, maxChunks: 20, maxContext: 20000, label: "Research" },
+            deep_research: { maxQueries: 10, maxSources: 20, maxUrlsToRead: 10, maxChunks: 30, maxContext: 28000, label: "Deep Research" },
+        };
+        const safeMode: keyof typeof modeMap = Object.keys(modeMap).includes(searchMode) ? searchMode : "search";
+        const modeConfig = modeMap[safeMode];
 
         const encoder = new TextEncoder();
         const stream = new ReadableStream({
@@ -816,7 +824,7 @@ export async function POST(req: Request) {
                 };
 
                 try {
-                    sendEvent("step", { message: "Understanding your question..." });
+                    sendEvent("step", { message: `${modeConfig.label}: Understanding your question...` });
 
                     // ── Step 1: Classify Query ────────────────────────
                     const queryInfo = classifyQuery(query);
@@ -878,9 +886,9 @@ RULES:
                             const parsed = JSON.parse(jsonMatch[0]);
                             if (parsed.core_query) coreQuery = parsed.core_query;
                             if (Array.isArray(parsed.search_queries)) {
-                                rewrittenQueries = parsed.search_queries.slice(0, 5);
+                                rewrittenQueries = parsed.search_queries.slice(0, modeConfig.maxQueries);
                             } else if (Array.isArray(parsed.queries)) {
-                                rewrittenQueries = parsed.queries.slice(0, 5);
+                                rewrittenQueries = parsed.queries.slice(0, modeConfig.maxQueries);
                             }
                         }
                     } catch (e) {
@@ -888,8 +896,8 @@ RULES:
                     }
 
                     // ── Step 3: Multi-Query Parallel Search ───────────
-                    const queriesToSearch = Array.from(new Set([coreQuery, ...rewrittenQueries])).slice(0, 6);
-                    console.log("[Aetheron Search] Queries:", queriesToSearch);
+                    const queriesToSearch = Array.from(new Set([coreQuery, ...rewrittenQueries])).slice(0, modeConfig.maxQueries + 1);
+                    console.log(`[Aetheron ${modeConfig.label}] Queries:`, queriesToSearch);
 
                     sendEvent("step", { message: `Searching across multiple sources...` });
 
@@ -931,7 +939,7 @@ RULES:
                     const rankedResults = rankResults(mergedResults, query, queryInfo);
 
                     // Enforce domain diversity and take top results
-                    const topSources = enforceDomainDiversity(rankedResults, 2).slice(0, 10);
+                    const topSources = enforceDomainDiversity(rankedResults, 2).slice(0, modeConfig.maxSources);
                     const topUrls = topSources.map((s) => s.url);
 
                     console.log("[Aetheron Sources]", topSources.map((s) => `${getHostname(s.url)}: ${s.title} (engines: ${s.engines?.join(",") || "?"})`));
@@ -943,8 +951,8 @@ RULES:
                         sendEvent("step", { message: `Found ${topUrls.length} sources. Reading content...` });
                     }
 
-                    // ── Step 5: Content Extraction (Top 6 URLs) ───────
-                    const urlsToRead = topUrls.slice(0, 6);
+                    // ── Step 5: Content Extraction ────────────────────
+                    const urlsToRead = topUrls.slice(0, modeConfig.maxUrlsToRead);
                     const extractionPromises = urlsToRead.map(async (url: string) => {
                         const hostname = getHostname(url);
                         const fallbackSnippet = topSources.find((s) => s.url === url)?.snippet || "";
@@ -1000,7 +1008,7 @@ RULES:
                     const sortedChunks = allChunks.sort((a, b) => b.score - a.score);
 
                     for (const chunk of sortedChunks) {
-                        if (topChunks.length >= 15) break;
+                        if (topChunks.length >= modeConfig.maxChunks) break;
                         const urlCount = chunksByUrl.get(chunk.url) || 0;
                         if (urlCount >= 3) continue; // Max 3 chunks per URL
                         topChunks.push(chunk);
@@ -1010,7 +1018,7 @@ RULES:
                     // ── Step 7: Build RAG Context ──────────────────────
                     let contextText = "";
                     let totalContextLength = 0;
-                    const maxContextLength = 14000;
+                    const maxContextLength = modeConfig.maxContext;
 
                     for (const chunk of topChunks) {
                         if (totalContextLength > maxContextLength) break;
