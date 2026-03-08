@@ -880,6 +880,23 @@ export async function POST(req: Request) {
                     controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type, ...data })}\n\n`));
                 };
 
+                // ═══════════════════════════════════════════════════
+                // TIME BUDGET SYSTEM — Prevents serverless timeout
+                // ═══════════════════════════════════════════════════
+                const startTime = Date.now();
+                // Detect if running in serverless (Netlify/Vercel) or localhost
+                const isServerless = !!(process.env.NETLIFY || process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+                // Reserve time for answer generation (answer stream needs at least 15s)
+                const ANSWER_RESERVE_MS = 15000;
+                // Total budget: serverless ~25s (Netlify Pro) or ~100s for localhost
+                const TOTAL_BUDGET_MS = isServerless ? 25000 : 100000;
+
+                const getElapsed = () => Date.now() - startTime;
+                const getRemainingBudget = () => TOTAL_BUDGET_MS - getElapsed();
+                const hasTimeForMoreResearch = () => getRemainingBudget() > ANSWER_RESERVE_MS + 5000;
+
+                console.log(`[TimeBudget] isServerless=${isServerless}, totalBudget=${TOTAL_BUDGET_MS}ms, answerReserve=${ANSWER_RESERVE_MS}ms`);
+
                 try {
                     // ═══════════════════════════════════════════════════
                     // RESEARCH PHASE INDICATOR
@@ -985,6 +1002,13 @@ RULES:
                     const allReadContent: { url: string; text: string; method: string }[] = [];
 
                     for (let round = 1; round <= modeConfig.rounds; round++) {
+                        // ── TIME BUDGET CHECK: Skip remaining rounds if running low ──
+                        if (round > 1 && !hasTimeForMoreResearch()) {
+                            console.log(`[TimeBudget] Skipping round ${round}/${modeConfig.rounds} — only ${getRemainingBudget()}ms remaining (need ${ANSWER_RESERVE_MS}ms for answer)`);
+                            sendEvent("step", { message: `Skipping round ${round} — prioritizing answer generation (${Math.round(getRemainingBudget() / 1000)}s remaining)...` });
+                            break;
+                        }
+
                         if (isResearch && round > 1) {
                             sendEvent("research_round", {
                                 round,
@@ -1088,25 +1112,35 @@ Respond with ONLY: {"gap_analysis": "brief description of what's missing", "foll
                             .map(s => s.url);
 
                         if (newUrlsToRead.length > 0) {
-                            sendEvent("step", { message: `Reading ${newUrlsToRead.length} new sources...` });
+                            // ── TIME BUDGET CHECK: Limit extraction if time is tight ──
+                            if (!hasTimeForMoreResearch()) {
+                                console.log(`[TimeBudget] Skipping content extraction — only ${getRemainingBudget()}ms remaining`);
+                                sendEvent("step", { message: "Skipping deep reading — prioritizing answer generation..." });
+                            } else {
+                                const extractionTimeoutMs = Math.min(
+                                    isDeepResearch ? 8000 : 6000,
+                                    Math.max(2000, getRemainingBudget() - ANSWER_RESERVE_MS - 3000) // Dynamic: never exceed remaining budget
+                                );
+                                sendEvent("step", { message: `Reading ${newUrlsToRead.length} new sources...` });
 
-                            const extractionPromises = newUrlsToRead.map(async (url: string) => {
-                                const hostname = getHostname(url);
-                                const fallbackSnippet = allTopSources.find((s) => s.url === url)?.snippet || "";
-                                sendEvent("reading_url", { url, hostname });
+                                const extractionPromises = newUrlsToRead.map(async (url: string) => {
+                                    const hostname = getHostname(url);
+                                    const fallbackSnippet = allTopSources.find((s) => s.url === url)?.snippet || "";
+                                    sendEvent("reading_url", { url, hostname });
 
-                                try {
-                                    const result = await extractPageContent(url, fallbackSnippet, isDeepResearch ? 8000 : 6000);
-                                    sendEvent("read_complete", { url, hostname, success: true });
-                                    return result;
-                                } catch {
-                                    sendEvent("read_complete", { url, hostname, success: true });
-                                    return { url, text: fallbackSnippet, method: "snippet" };
-                                }
-                            });
+                                    try {
+                                        const result = await extractPageContent(url, fallbackSnippet, extractionTimeoutMs);
+                                        sendEvent("read_complete", { url, hostname, success: true });
+                                        return result;
+                                    } catch {
+                                        sendEvent("read_complete", { url, hostname, success: true });
+                                        return { url, text: fallbackSnippet, method: "snippet" };
+                                    }
+                                });
 
-                            const pagesContent = await Promise.all(extractionPromises);
-                            allReadContent.push(...pagesContent);
+                                const pagesContent = await Promise.all(extractionPromises);
+                                allReadContent.push(...pagesContent);
+                            } // end time-budget else block
                         }
 
                         // ── Chunk and score ──────────────────────────────
@@ -1350,6 +1384,8 @@ ${contextText.length > 5 ? contextText : "No deep extraction available. Rely ENT
                     const answerChain = [userSelectedModelId, ...MODEL_FALLBACK_CHAIN.filter(m => m !== userSelectedModelId)];
                     let answerGenerated = false;
                     let streamFullText = "";
+
+                    console.log(`[TimeBudget] Starting answer generation. Elapsed: ${getElapsed()}ms, Remaining: ${getRemainingBudget()}ms`);
 
                     for (const modelId of answerChain) {
                         if (answerGenerated) break;

@@ -1,0 +1,11 @@
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[functions]
+  # Maximum timeout for Netlify functions (26s on Pro, 10s on free)
+  # This helps our research pipeline complete before being killed
+  node_bundler = "esbuild"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
