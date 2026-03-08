@@ -4,12 +4,63 @@ import { createGroq } from "@ai-sdk/groq";
 export const maxDuration = 120;
 
 // ─────────────────────────────────────────────────────────────
-// Setup Groq provider
+// Setup Groq provider with Cascading Model Fallback Chain
 // ─────────────────────────────────────────────────────────────
 const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
-const rewriteModel = groq(process.env.REWRITE_MODEL || "llama-3.1-8b-instant");
-const fallbackModelId = "llama-3.1-8b-instant";
-const fallbackModel = groq(fallbackModelId);
+
+// Ordered fallback chain — when a model hits rate limits, we cascade to the next.
+// Ordered by quality (best first), with fast/high-limit models at the end as safety nets.
+const MODEL_FALLBACK_CHAIN = [
+    "llama-3.3-70b-versatile",              // Best quality, lower rate limits
+    "meta-llama/llama-4-scout-17b-16e-instruct", // Good quality, decent limits
+    "qwen/qwen3-32b",                       // Smart alternative
+    "llama-3.1-8b-instant",                 // Fast, highest rate limits (14.4K RPD)
+    "gemma2-9b-it",                         // Google's model, separate rate limit pool
+];
+
+// Fast models for query rewriting (high rate limit, low latency)
+const REWRITE_FALLBACK_CHAIN = [
+    "llama-3.1-8b-instant",
+    "gemma2-9b-it",
+    "llama-3.3-70b-versatile",
+];
+
+/**
+ * Attempts to call generateText with cascading model fallback.
+ * Tries each model in the fallback chain until one succeeds.
+ */
+async function generateTextWithFallback(
+    options: { system: string; prompt: string },
+    fallbackChain: string[] = REWRITE_FALLBACK_CHAIN,
+    label: string = "generateText"
+): Promise<{ text: string; modelUsed: string }> {
+    let lastError: unknown = null;
+    for (const modelId of fallbackChain) {
+        try {
+            const gen = await generateText({
+                model: groq(modelId),
+                system: options.system,
+                prompt: options.prompt,
+            });
+            if (gen.text && gen.text.trim().length > 0) {
+                return { text: gen.text, modelUsed: modelId };
+            }
+            console.warn(`[${label}] Model ${modelId} returned empty text, trying next...`);
+        } catch (e: unknown) {
+            lastError = e;
+            const errMsg = e instanceof Error ? e.message : String(e);
+            const isRateLimit = errMsg.includes("429") || errMsg.toLowerCase().includes("rate") || errMsg.toLowerCase().includes("limit") || errMsg.includes("quota");
+            const isNotFound = errMsg.includes("404") || errMsg.toLowerCase().includes("not found");
+            const isOverloaded = errMsg.includes("503") || errMsg.toLowerCase().includes("overloaded");
+            console.warn(`[${label}] Model ${modelId} failed (rateLimit=${isRateLimit}, notFound=${isNotFound}, overloaded=${isOverloaded}):`, errMsg.substring(0, 200));
+            // Continue to next model in chain
+        }
+    }
+    throw new Error(`[${label}] All models in fallback chain exhausted. Last error: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+}
+
+
+
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -807,9 +858,8 @@ function getHostname(url: string): string {
 export async function POST(req: Request) {
     try {
         const { messages, model: requestedModel, mode: searchMode } = await req.json();
-        const selectedAnswerModel = groq(
-            requestedModel || process.env.ANSWER_MODEL || "llama-3.3-70b-versatile"
-        );
+        // Store the model ID string (not the instantiated model) so we can use fallback chains
+        const userSelectedModelId = requestedModel || "llama-3.3-70b-versatile";
         const latestMessage = messages[messages.length - 1];
         const query = latestMessage.content;
 
@@ -905,23 +955,13 @@ RULES:
                             rewritePrompt = `User Query: "${query}"\n\nGenerate ${queryCount} diverse search queries that together will comprehensively answer this query from multiple angles and sources.\n\nRespond with ONLY: {"core_query": "${query}", "search_queries": [${Array(queryCount).fill('"q"').join(', ')}]}`;
                         }
 
-                        let rewriteResult;
-                        try {
-                            const gen = await generateText({
-                                model: rewriteModel,
-                                system: rewriteSystemPrompt,
-                                prompt: rewritePrompt,
-                            });
-                            rewriteResult = gen.text;
-                        } catch (e: unknown) {
-                            console.warn("Primary rewrite failed, falling back:", e);
-                            const gen = await generateText({
-                                model: fallbackModel,
-                                system: rewriteSystemPrompt,
-                                prompt: rewritePrompt,
-                            });
-                            rewriteResult = gen.text;
-                        }
+                        const rewriteGen = await generateTextWithFallback(
+                            { system: rewriteSystemPrompt, prompt: rewritePrompt },
+                            REWRITE_FALLBACK_CHAIN,
+                            "QueryRewrite"
+                        );
+                        const rewriteResult = rewriteGen.text;
+                        console.log(`[QueryRewrite] Used model: ${rewriteGen.modelUsed}`);
 
                         const jsonMatch = rewriteResult.match(/\{[\s\S]*\}/);
                         if (jsonMatch) {
@@ -964,10 +1004,8 @@ RULES:
                             // For subsequent rounds: generate follow-up queries based on what we've learned
                             try {
                                 const knownSnippets = allTopSources.slice(0, 10).map(s => s.snippet).filter(Boolean).join("\n");
-                                let followUpResult;
-                                try {
-                                    const gen = await generateText({
-                                        model: rewriteModel,
+                                const followUpGen = await generateTextWithFallback(
+                                    {
                                         system: `You are a research analyst performing multi-round investigative research. Based on initial findings, identify GAPS in the research and generate follow-up queries to fill those gaps. Output ONLY valid JSON.`,
                                         prompt: `Original question: "${query}"
 
@@ -976,18 +1014,13 @@ ${knownSnippets.substring(0, 2000)}
 
 What key information is STILL MISSING? Generate ${round === 2 ? 4 : 3} follow-up search queries to fill gaps, find contradicting viewpoints, get statistics/numbers, or verify claims.
 
-Respond with ONLY: {"gap_analysis": "brief description of what's missing", "follow_up_queries": ["q1", "q2", "q3"${round === 2 ? ', "q4"' : ''}]}`,
-                                    });
-                                    followUpResult = gen.text;
-                                } catch (e: unknown) {
-                                    console.warn("Follow-up generation failed, falling back:", e);
-                                    const gen = await generateText({
-                                        model: fallbackModel,
-                                        system: `You are a research analyst... Output ONLY valid JSON.`,
-                                        prompt: `Original question: "${query}" ... Generate ${round === 2 ? 4 : 3} follow-up search queries...`,
-                                    });
-                                    followUpResult = gen.text;
-                                }
+Respond with ONLY: {"gap_analysis": "brief description of what's missing", "follow_up_queries": ["q1", "q2", "q3"${round === 2 ? ', "q4"' : ''}]}`
+                                    },
+                                    REWRITE_FALLBACK_CHAIN,
+                                    "FollowUpQueries"
+                                );
+                                const followUpResult = followUpGen.text;
+                                console.log(`[FollowUpQueries] Used model: ${followUpGen.modelUsed}`);
 
                                 const fMatch = followUpResult.match(/\{[\s\S]*\}/);
                                 if (fMatch) {
@@ -1309,25 +1342,53 @@ ${sourceListText}
 ${contextText.length > 5 ? contextText : "No deep extraction available. Rely ENTIRELY on the Available sources & metadata above to answer the query. Be creative in synthesizing the available snippets and metadata into a rich, informative answer."}`;
                     }
 
-                    let result;
-                    try {
-                        result = await streamText({
-                            model: selectedAnswerModel,
-                            system: ragSystemPrompt,
-                            messages: messages,
-                        });
-                    } catch (primaryError: unknown) {
-                        console.error("Primary model failed, falling back:", primaryError);
-                        // If primary model fails (429 or 404), use the high-limit fallback
-                        result = await streamText({
-                            model: fallbackModel,
-                            system: ragSystemPrompt,
-                            messages: messages,
-                        });
+                    // ── ROBUST CASCADING STREAM WITH RETRY ────────────
+                    // The key insight: streamText() might not throw immediately.
+                    // Rate limit errors (429) can occur MID-STREAM when reading textStream.
+                    // So we need to catch errors at the stream-reading level too,
+                    // and retry with the next model in the chain.
+                    const answerChain = [userSelectedModelId, ...MODEL_FALLBACK_CHAIN.filter(m => m !== userSelectedModelId)];
+                    let answerGenerated = false;
+                    let streamFullText = "";
+
+                    for (const modelId of answerChain) {
+                        if (answerGenerated) break;
+                        try {
+                            console.log(`[AnswerStream] Trying model: ${modelId}`);
+                            const result = streamText({
+                                model: groq(modelId),
+                                system: ragSystemPrompt,
+                                messages: messages,
+                            });
+
+                            streamFullText = "";
+                            for await (const chunk of result.textStream) {
+                                streamFullText += chunk;
+                                sendEvent("text-delta", { delta: chunk });
+                            }
+
+                            // Verify we actually got content
+                            if (streamFullText.trim().length > 0) {
+                                answerGenerated = true;
+                                console.log(`[AnswerStream] Successfully generated answer with model: ${modelId} (${streamFullText.length} chars)`);
+                            } else {
+                                console.warn(`[AnswerStream] Model ${modelId} returned empty stream, trying next...`);
+                            }
+                        } catch (streamError: unknown) {
+                            const errMsg = streamError instanceof Error ? streamError.message : String(streamError);
+                            console.warn(`[AnswerStream] Model ${modelId} stream failed:`, errMsg.substring(0, 300));
+                            // If we already streamed some partial text, let the user know we're retrying
+                            if (streamFullText.length > 0) {
+                                sendEvent("text-delta", { delta: "\n\n⚠️ *Model rate limited mid-response. Retrying with another model...*\n\n" });
+                                streamFullText = ""; // Reset for clean retry
+                            }
+                        }
                     }
 
-                    for await (const chunk of result.textStream) {
-                        sendEvent("text-delta", { delta: chunk });
+                    // If ALL models failed, send an error message as the answer
+                    if (!answerGenerated) {
+                        console.error("[AnswerStream] ALL models in fallback chain failed!");
+                        sendEvent("text-delta", { delta: "⚠️ **All AI models are currently rate-limited.** Please wait a moment and try again. This typically resolves within 30-60 seconds.\n\nIn the meantime, you can review the sources above for your answer." });
                     }
 
                     if (isResearch) {

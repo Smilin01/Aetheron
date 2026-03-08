@@ -382,6 +382,13 @@ function SearchContent() {
                                         );
                                     } else if (data.type === "error") {
                                         console.error("Server streaming error:", data.message);
+                                        // Show the error in the answer area so user sees it
+                                        fullText += `\n\n⚠️ **Error:** ${data.message || "An unexpected error occurred."}\n\nPlease try again or select a different model.`;
+                                        setMessages((prev) =>
+                                            prev.map((m) =>
+                                                m.id === assistantId ? { ...m, content: fullText } : m
+                                            )
+                                        );
                                     } else if (data.type === "research_start") {
                                         setResearchRound({ current: 1, total: data.totalRounds });
                                         setProcessSteps((prev) => [
@@ -407,6 +414,18 @@ function SearchContent() {
                             }
                         }
                     }
+                }
+
+                // Safety net: if the stream ended but the assistant message is still empty,
+                // show a fallback message so the user isn't left with a blank answer
+                if (fullText.trim().length === 0) {
+                    console.warn("[Frontend] Stream ended with empty answer text");
+                    fullText = "⚠️ **The AI model didn't generate a response.** This usually happens when all models are temporarily rate-limited.\n\nPlease try again in a few seconds, or try selecting a different model from the dropdown.";
+                    setMessages((prev) =>
+                        prev.map((m) =>
+                            m.id === assistantId ? { ...m, content: fullText } : m
+                        )
+                    );
                 }
             } catch (error) {
                 console.error("Stream error:", error);
