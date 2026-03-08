@@ -911,7 +911,7 @@ RULES:
                                 prompt: rewritePrompt,
                             });
                             rewriteResult = gen.text;
-                        } catch (e) {
+                        } catch (e: unknown) {
                             console.warn("Primary rewrite failed, falling back:", e);
                             const gen = await generateText({
                                 model: fallbackModel,
@@ -977,7 +977,7 @@ What key information is STILL MISSING? Generate ${round === 2 ? 4 : 3} follow-up
 Respond with ONLY: {"gap_analysis": "brief description of what's missing", "follow_up_queries": ["q1", "q2", "q3"${round === 2 ? ', "q4"' : ''}]}`,
                                     });
                                     followUpResult = gen.text;
-                                } catch (e) {
+                                } catch (e: unknown) {
                                     console.warn("Follow-up generation failed, falling back:", e);
                                     const gen = await generateText({
                                         model: fallbackModel,
@@ -1314,7 +1314,7 @@ ${contextText.length > 5 ? contextText : "No deep extraction available. Rely ENT
                             system: ragSystemPrompt,
                             messages: messages,
                         });
-                    } catch (primaryError: any) {
+                    } catch (primaryError: unknown) {
                         console.error("Primary model failed, falling back:", primaryError);
                         // If primary model fails (429 or 404), use the high-limit fallback
                         result = await streamText({
