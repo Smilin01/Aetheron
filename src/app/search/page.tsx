@@ -112,10 +112,10 @@ const MoonshotLogo = (props: React.SVGProps<SVGSVGElement>) => (
 
 // Available Groq models
 const MODELS = [
-    { id: "meta-llama/llama-4-scout-17b-16e-instruct", label: "Llama 4 Scout", badge: "", icon: <MetaLogo className="w-3.5 h-3.5" /> },
     { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B", badge: "Pro", icon: <MetaLogo className="w-3.5 h-3.5" /> },
-    { id: "moonshotai/kimi-k2-instruct", label: "Kimi K2", badge: "Smart", icon: <MoonshotLogo className="w-3.5 h-3.5" /> },
-    { id: "qwen/qwen3-32b", label: "Qwen 3 32B", badge: "", icon: <AlibabaLogo className="w-3.5 h-3.5" /> },
+    { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B", badge: "Fast", icon: <MetaLogo className="w-3.5 h-3.5" /> },
+    { id: "mixtral-8x7b-32768", label: "Mixtral", badge: "Smart", icon: <MoonshotLogo className="w-3.5 h-3.5" /> },
+    { id: "gemma2-9b-it", label: "Gemma 2", badge: "", icon: <AlibabaLogo className="w-3.5 h-3.5" /> },
 ];
 
 // ─── Inline Citation Component ──────────────────────────────

@@ -804,7 +804,7 @@ export async function POST(req: Request) {
     try {
         const { messages, model: requestedModel, mode: searchMode } = await req.json();
         const selectedAnswerModel = groq(
-            requestedModel || process.env.ANSWER_MODEL || "meta-llama/llama-4-scout-17b-16e-instruct"
+            requestedModel || process.env.ANSWER_MODEL || "llama-3.3-70b-versatile"
         );
         const latestMessage = messages[messages.length - 1];
         const query = latestMessage.content;
