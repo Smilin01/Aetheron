@@ -7,7 +7,9 @@ export const maxDuration = 120;
 // Setup Groq provider
 // ─────────────────────────────────────────────────────────────
 const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
-const rewriteModel = groq("llama-3.1-8b-instant");
+const rewriteModel = groq(process.env.REWRITE_MODEL || "llama-3.1-8b-instant");
+const fallbackModelId = "llama-3.1-8b-instant";
+const fallbackModel = groq(fallbackModelId);
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -80,7 +82,8 @@ async function querySearXNGInstance(
         if (options.timeRange) params.set("time_range", options.timeRange);
         if (options.pageno) params.set("pageno", options.pageno.toString());
 
-        const url = `${instance.trim()}/search?${params.toString()}`;
+        const baseUrl = instance.trim().endsWith('/') ? instance.trim().slice(0, -1) : instance.trim();
+        const url = `${baseUrl}/search?${params.toString()}`;
         const res = await fetch(url, {
             signal: controller.signal,
             headers: {
@@ -129,9 +132,10 @@ async function querySearXNG(
     for (const instance of PRIVATE_INSTANCES) {
         try {
             const results = await querySearXNGInstance(instance, query, options);
-            if (results.length > 0) return results;
-        } catch {
-            console.warn(`[SearXNG] Private instance failed: ${instance}`);
+            if (results && results.length > 0) return results;
+            console.log(`[SearXNG] Private instance returned zero results: ${instance}`);
+        } catch (e) {
+            console.warn(`[SearXNG] Private instance failed: ${instance}`, e);
         }
     }
 
@@ -495,8 +499,8 @@ function isResultRelevant(result: SearchResult, query: string, queryInfo: QueryC
     const matchingWords = queryWords.filter((w: string) => combinedText.includes(w));
     const matchRatio = matchingWords.length / queryWords.length;
 
-    // Require at least 25% keyword match
-    if (matchRatio < 0.25) return false;
+    // Relaxed requirement: at least 15% keyword match OR at least 2 keywords
+    if (matchRatio < 0.15 && matchingWords.length < 2) return false;
 
     // Filter out irrelevant domains for person queries
     if (queryInfo.isPerson) {
@@ -806,8 +810,6 @@ export async function POST(req: Request) {
         const selectedAnswerModel = groq(
             requestedModel || process.env.ANSWER_MODEL || "llama-3.3-70b-versatile"
         );
-        const fallbackModelId = "llama-3.1-8b-instant";
-        const fallbackModel = groq(fallbackModelId);
         const latestMessage = messages[messages.length - 1];
         const query = latestMessage.content;
 
@@ -961,7 +963,7 @@ RULES:
                         } else {
                             // For subsequent rounds: generate follow-up queries based on what we've learned
                             try {
-                                const knownSnippets = allTopSources.slice(0, 8).map(s => s.snippet).filter(Boolean).join("\n");
+                                const knownSnippets = allTopSources.slice(0, 10).map(s => s.snippet).filter(Boolean).join("\n");
                                 let followUpResult;
                                 try {
                                     const gen = await generateText({
@@ -970,7 +972,7 @@ RULES:
                                         prompt: `Original question: "${query}"
 
 Initial findings summary:
-${knownSnippets.substring(0, 3000)}
+${knownSnippets.substring(0, 2000)}
 
 What key information is STILL MISSING? Generate ${round === 2 ? 4 : 3} follow-up search queries to fill gaps, find contradicting viewpoints, get statistics/numbers, or verify claims.
 
