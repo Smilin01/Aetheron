@@ -809,11 +809,90 @@ function scoreChunk(chunk: string, queryKeywords: string[]): number {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Tavily Search Provider (additive — used when TAVILY_API_KEY is set)
+// ─────────────────────────────────────────────────────────────
+
+async function searchTavily(query: string, options?: { maxResults?: number; searchDepth?: string; topic?: string }): Promise<SearchResult[]> {
+    const apiKey = process.env.TAVILY_API_KEY;
+    if (!apiKey) return [];
+
+    const maxResults = options?.maxResults ?? 10;
+    const searchDepth = options?.searchDepth ?? "basic";
+    const topic = options?.topic ?? "general";
+
+    try {
+        const response = await fetch("https://api.tavily.com/search", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                api_key: apiKey,
+                query,
+                max_results: maxResults,
+                search_depth: searchDepth,
+                topic,
+                include_answer: false,
+                include_raw_content: false,
+                include_images: false,
+            }),
+        });
+
+        if (!response.ok) {
+            console.warn(`[Tavily] Search failed with status ${response.status}`);
+            return [];
+        }
+
+        const data = await response.json();
+        const results: SearchResult[] = (data.results || []).map((r: { title?: string; url?: string; content?: string; score?: number }) => {
+            let favicon = "";
+            try {
+                const hostname = new URL(r.url || "").hostname;
+                favicon = `https://www.google.com/s2/favicons?domain=${hostname}&sz=128`;
+            } catch { /* ignore */ }
+
+            return {
+                title: r.title || "",
+                url: r.url || "",
+                favicon,
+                snippet: r.content || "",
+                engine: "tavily",
+                score: r.score ?? 0,
+                engines: ["tavily"],
+            };
+        });
+
+        console.log(`[Tavily] Returned ${results.length} results for: "${query}"`);
+        return results;
+    } catch (e) {
+        console.warn(`[Tavily] Error:`, e instanceof Error ? e.message : String(e));
+        return [];
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
 // Web Search Orchestrator — The Main Search Pipeline
 // ─────────────────────────────────────────────────────────────
 
 async function webSearch(query: string, queryInfo: QueryClassification, isFollowUp: boolean = false): Promise<SearchResult[]> {
-    // Get results from SearXNG (which internally queries multiple engines)
+    const hasTavily = !!process.env.TAVILY_API_KEY;
+
+    if (hasTavily) {
+        // Use Tavily as primary, fall back to SearXNG if Tavily returns no results
+        const tavilyResults = await searchTavily(query, {
+            maxResults: 10,
+            searchDepth: isFollowUp ? "basic" : "advanced",
+            topic: queryInfo.isCurrentEvents ? "news" : "general",
+        });
+
+        if (tavilyResults.length > 0) {
+            const filtered = tavilyResults.filter((r) => isResultRelevant(r, query, queryInfo));
+            if (filtered.length > 0) return filtered;
+        }
+
+        // Fallback to SearXNG if Tavily returned nothing useful
+        console.log("[webSearch] Tavily returned no useful results, falling back to SearXNG");
+    }
+
+    // SearXNG path (default when TAVILY_API_KEY is not set, or as fallback)
     const results = await searchSearXNG(query, queryInfo, isFollowUp).catch(() => [] as SearchResult[]);
 
     // Filter irrelevant results

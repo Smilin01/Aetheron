@@ -85,9 +85,14 @@ GROQ_API_KEY=gsk_your_api_key_here
 # Optional: Override the default synthesis model
 # ANSWER_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
 
-# Optional: A comma-separated list of your preferred SearXNG instances. 
+# Optional: A comma-separated list of your preferred SearXNG instances.
 # If not provided, it falls back to a curated list of reliable public nodes.
 # SEARXNG_INSTANCES=https://search.sapti.me,https://searx.be
+
+# Optional: Tavily API key to use Tavily as the primary search provider.
+# When set, Tavily is used first; SearXNG is the fallback if Tavily returns no results.
+# Get your key at https://app.tavily.com (1,000 free credits/month)
+# TAVILY_API_KEY=tvly-your_api_key_here
 ```
 
 ### 5. Run the Application
